@@ -8,6 +8,7 @@ import { Textarea } from '../components/common/Textarea';
 import type { BusinessProfile, CurrencyCode } from '../types';
 import { StorageService } from '../services/storage';
 import { getLogoOptions } from '../utils/logo';
+import { BusinessAvatar } from '../components/common/BusinessAvatar';
 import {
   Building2,
   Upload,
@@ -165,30 +166,13 @@ export const SettingsPage: React.FC = () => {
 
           {/* Logo Upload Section */}
           <div className="flex flex-col sm:flex-row sm:items-center gap-5 p-4 rounded-xl border border-slate-200 bg-slate-50/50">
-            <div className="flex h-20 w-36 items-center justify-center overflow-hidden shrink-0">
-              {logoPreview ? (
-                <span
-                  className="flex max-h-full max-w-full items-center justify-center"
-                  style={{
-                    width: `${logoOptions.size}px`,
-                    height: `${Math.min(logoOptions.size, 64)}px`,
-                    padding: `${logoOptions.padding}px`,
-                    backgroundColor: logoOptions.backgroundColor,
-                  }}
-                >
-                  <img
-                    src={logoPreview}
-                    alt="Logo"
-                    className="h-full w-full"
-                    style={{
-                      objectFit: logoOptions.fit,
-                      objectPosition: `${logoOptions.alignment} center`,
-                    }}
-                  />
-                </span>
-              ) : (
-                <span className="text-xs text-slate-400 font-medium">No Logo</span>
-              )}
+            <div className="flex h-20 w-24 items-center justify-center shrink-0">
+              <BusinessAvatar
+                name={profile.name}
+                logoUrl={logoPreview}
+                size={72}
+                tone="light"
+              />
             </div>
 
             <div className="space-y-2">

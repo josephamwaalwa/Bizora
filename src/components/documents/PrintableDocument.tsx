@@ -3,6 +3,7 @@ import type { Quotation, Invoice } from '../../types';
 import { formatCurrency, formatDate } from '../../utils/formatters';
 import { getLogoOptions } from '../../utils/logo';
 import { QuotationPrintableDocument } from './QuotationPrintableDocument';
+import { DocumentLogo } from '../common/DocumentLogo';
 
 interface PrintableDocumentProps {
   document: Quotation | Invoice;
@@ -34,27 +35,11 @@ export const PrintableDocument: React.FC<PrintableDocumentProps> = ({ document, 
         {/* Company Identity */}
         <div className="space-y-2 max-w-sm">
           <div className="flex items-start gap-3">
-            {business.logoUrl && (
-              <div
-                className="flex shrink-0 items-center justify-center overflow-hidden"
-                style={{
-                  width: `${logo.size}px`,
-                  height: `${Math.min(logo.size, 64)}px`,
-                  padding: `${logo.padding}px`,
-                  backgroundColor: logo.backgroundColor,
-                }}
-              >
-                <img
-                  src={business.logoUrl}
-                  alt={`${business.name} logo`}
-                  className="h-full w-full"
-                  style={{
-                    objectFit: logo.fit,
-                    objectPosition: `${logo.alignment} center`,
-                  }}
-                />
-              </div>
-            )}
+            <DocumentLogo
+              business={business}
+              maxWidth={Math.min(Math.max(logo.size, 44), 140)}
+              maxHeight={56}
+            />
             <div className="min-w-0">
               <h1 className="text-xl font-bold tracking-tight text-slate-900 font-sans">
                 {business.name}

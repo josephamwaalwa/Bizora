@@ -196,12 +196,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   // Quotations
   const saveQuotation = useCallback((quote: Quotation) => {
     const saved = StorageService.saveQuotation(quote);
+    const persisted = StorageService.lastWritePersisted;
     refreshData();
-    addToast({
-      type: 'success',
-      title: 'Quotation Saved',
-      message: `${saved.quotationNumber} has been saved successfully.`,
-    });
+    if (persisted) {
+      addToast({
+        type: 'success',
+        title: 'Quotation Saved',
+        message: `${saved.quotationNumber} has been saved successfully.`,
+      });
+    } else {
+      addToast({
+        type: 'warning',
+        title: 'Saved to Active Session',
+        message: `${saved.quotationNumber} was saved in memory, but browser storage could not persist it across page reloads.`,
+      });
+    }
     return saved;
   }, [refreshData, addToast]);
 

@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { Button } from '../common/Button';
 import { formatRelativeTime } from '../../utils/formatters';
-import { getLogoOptions } from '../../utils/logo';
+import { BusinessAvatar } from '../common/BusinessAvatar';
 
 interface TopBarProps {
   onOpenMobileSidebar: () => void;
@@ -33,7 +33,6 @@ export const TopBar: React.FC<TopBarProps> = ({ onOpenMobileSidebar }) => {
     resetToDemoData,
     showConfirmDialog,
   } = useApp();
-  const logoOptions = getLogoOptions(businessProfile);
 
   const [showNotifications, setShowNotifications] = useState(false);
   const [showQuickCreate, setShowQuickCreate] = useState(false);
@@ -221,29 +220,12 @@ export const TopBar: React.FC<TopBarProps> = ({ onOpenMobileSidebar }) => {
             <span className="hidden max-w-[200px] truncate text-[15px] text-ink sm:inline">
               {businessProfile.name}
             </span>
-            <div
-              className="flex shrink-0 items-center justify-center overflow-hidden text-[14px] font-medium text-ink"
-              style={{
-                width: `${Math.min(48, logoOptions.size)}px`,
-                height: `${Math.min(48, logoOptions.size)}px`,
-                backgroundColor: businessProfile.logoUrl ? logoOptions.backgroundColor : undefined,
-              }}
-            >
-              {businessProfile.logoUrl ? (
-                <img
-                  src={businessProfile.logoUrl}
-                  alt={`${businessProfile.name} logo`}
-                  className="h-full w-full"
-                  style={{
-                    objectFit: logoOptions.fit,
-                    objectPosition: `${logoOptions.alignment} center`,
-                    padding: `${logoOptions.padding}px`,
-                  }}
-                />
-              ) : (
-                businessProfile.name.charAt(0) || 'B'
-              )}
-            </div>
+            <BusinessAvatar
+              name={businessProfile.name}
+              logoUrl={businessProfile.logoUrl}
+              size={38}
+              tone="light"
+            />
           </button>
 
           {showProfileMenu && (

@@ -11,7 +11,7 @@ import { ClientDetailPage } from './pages/ClientDetailPage';
 import { SettingsPage } from './pages/SettingsPage';
 
 const AppContent: React.FC = () => {
-  const { activeView } = useApp();
+  const { activeView, activeEntityId } = useApp();
 
   const renderActiveView = () => {
     switch (activeView) {
@@ -21,12 +21,12 @@ const AppContent: React.FC = () => {
         return <QuotationsPage />;
       case 'quotation-new':
       case 'quotation-edit':
-        return <QuotationFormPage />;
+        return <QuotationFormPage key={`${activeView}-${activeEntityId ?? 'new'}`} />;
       case 'invoices':
         return <InvoicesPage />;
       case 'invoice-new':
       case 'invoice-edit':
-        return <InvoiceFormPage />;
+        return <InvoiceFormPage key={`${activeView}-${activeEntityId ?? 'new'}`} />;
       case 'clients':
         return <ClientsPage />;
       case 'client-detail':

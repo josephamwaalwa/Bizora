@@ -28,6 +28,7 @@ export const QuotationFormPage: React.FC = () => {
     saveClient,
     openDocumentPreview,
     addToast,
+    refreshData,
   } = useApp();
 
   const isEditing = Boolean(activeEntityId);
@@ -164,12 +165,15 @@ export const QuotationFormPage: React.FC = () => {
     );
   };
 
-  const handleQuickAddClient = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleQuickAddClient = (e?: React.FormEvent) => {
+    e?.preventDefault();
     if (!newClientName.trim()) {
-      setErrorMsg('Client name is required.');
+      const msg = 'Client name is required.';
+      setErrorMsg(msg);
+      addToast({ type: 'error', title: 'Missing Client Name', message: msg });
       return;
     }
+    setErrorMsg('');
     const created = saveClient({
       name: newClientName.trim(),
       companyName: newClientCompany.trim() || undefined,
@@ -186,38 +190,63 @@ export const QuotationFormPage: React.FC = () => {
     setNewClientAddress('');
   };
 
+  const reportValidationError = (message: string) => {
+    setErrorMsg(message);
+    addToast({
+      type: 'error',
+      title: 'Cannot Save Quotation',
+      message,
+    });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   const handleSave = (viewAfterSave: boolean = false) => {
     setErrorMsg('');
 
-    if (!selectedClientId && !currentClient) {
-      setErrorMsg('Please select or add a client.');
+    let clientToUse: Client | undefined = currentClient;
+
+    if (isAddingNewClient) {
+      if (newClientName.trim()) {
+        clientToUse = saveClient({
+          name: newClientName.trim(),
+          companyName: newClientCompany.trim() || undefined,
+          email: newClientEmail.trim() || `${newClientName.toLowerCase().replace(/\s+/g, '')}@example.com`,
+          phone: newClientPhone.trim(),
+          address: newClientAddress.trim(),
+        });
+        setSelectedClientId(clientToUse.id);
+        setIsAddingNewClient(false);
+        setNewClientName('');
+        setNewClientCompany('');
+        setNewClientEmail('');
+        setNewClientPhone('');
+        setNewClientAddress('');
+      } else if (!clientToUse) {
+        reportValidationError('Please enter a client name or select an existing client.');
+        return;
+      }
+    }
+
+    if (!clientToUse) {
+      reportValidationError('Please select or add a client before saving.');
       return;
     }
 
-    if (items.some((item) => !item.description.trim())) {
-      setErrorMsg('Please enter a description for all line items.');
+    if (items.length === 0 || items.some((item) => !item.description.trim())) {
+      reportValidationError('Please enter a description for all line items.');
       return;
     }
 
-    const clientToSave: Client = currentClient || {
-      id: selectedClientId || generateId('cli'),
-      name: 'Client',
-      email: '',
-      phone: '',
-      address: '',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    if (!isEditing) {
-      StorageService.incrementQuoteNumber();
-    }
+    const fallbackQuoteNumber = formatDocNumber(
+      businessProfile.quotePrefix || 'QUO-',
+      businessProfile.nextQuoteNumber || 1
+    );
 
     const quoteToSave: Quotation = {
       id: existingQuote?.id || generateId('quo'),
-      quotationNumber: quotationNumber.trim() || 'QUO-0001',
-      clientId: clientToSave.id,
-      clientSnapshot: clientToSave,
+      quotationNumber: quotationNumber.trim() || fallbackQuoteNumber,
+      clientId: clientToUse.id,
+      clientSnapshot: clientToUse,
       businessSnapshot: businessProfile,
       issueDate,
       expiryDate,
@@ -229,7 +258,7 @@ export const QuotationFormPage: React.FC = () => {
       discountValue: Number(discountValue) || 0,
       discountAmount: financials.discountAmount,
       taxName: isTaxEnabled ? taxName : 'None',
-      taxRate: isTaxEnabled ? Number(taxRate) : 0,
+      taxRate: isTaxEnabled ? Number(taxRate) || 0 : 0,
       taxAmount: financials.taxAmount,
       grandTotal: financials.grandTotal,
       status,
@@ -240,10 +269,15 @@ export const QuotationFormPage: React.FC = () => {
       updatedAt: new Date().toISOString(),
     };
 
-    saveQuotation(quoteToSave);
+    const saved = saveQuotation(quoteToSave);
+
+    if (!isEditing) {
+      StorageService.incrementQuoteNumber();
+      refreshData();
+    }
 
     if (viewAfterSave) {
-      openDocumentPreview('quote', quoteToSave);
+      openDocumentPreview('quote', saved);
     }
     setActiveView('quotations');
   };
@@ -254,6 +288,7 @@ export const QuotationFormPage: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-200/80">
         <div className="flex items-center gap-3">
           <Button
+            type="button"
             variant="secondary"
             size="sm"
             onClick={() => setActiveView('quotations')}
@@ -272,10 +307,11 @@ export const QuotationFormPage: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          <Button variant="secondary" size="sm" onClick={() => handleSave(false)}>
+          <Button type="button" variant="secondary" size="sm" onClick={() => handleSave(false)}>
             Save Draft
           </Button>
           <Button
+            type="button"
             variant="primary"
             size="sm"
             onClick={() => handleSave(true)}
@@ -385,10 +421,10 @@ export const QuotationFormPage: React.FC = () => {
                   placeholder="Street, City, Namibia"
                 />
                 <div className="flex justify-end gap-2 pt-1">
-                  <Button variant="secondary" size="sm" onClick={() => setIsAddingNewClient(false)}>
+                  <Button type="button" variant="secondary" size="sm" onClick={() => setIsAddingNewClient(false)}>
                     Cancel
                   </Button>
-                  <Button variant="primary" size="sm" onClick={handleQuickAddClient}>
+                  <Button type="button" variant="primary" size="sm" onClick={() => handleQuickAddClient()}>
                     Save & Select
                   </Button>
                 </div>
@@ -437,6 +473,7 @@ export const QuotationFormPage: React.FC = () => {
                 Itemised Services & Products
               </span>
               <Button
+                type="button"
                 variant="secondary"
                 size="sm"
                 onClick={handleAddItem}
@@ -700,6 +737,7 @@ export const QuotationFormPage: React.FC = () => {
 
             <div className="pt-2">
               <Button
+                type="button"
                 variant="primary"
                 size="md"
                 className="w-full"
