@@ -99,7 +99,7 @@ export const DashboardPage: React.FC = () => {
             <p className="mt-4 text-[15px] text-ink-secondary">
               {outstandingInvoices.length} open {outstandingInvoices.length === 1 ? 'account' : 'accounts'}
               {overdueInvoices.length > 0 && (
-                <span className="text-[#8E3B32]"> · {overdueInvoices.length} overdue</span>
+                <span className="text-[#8E3B32] dark:text-rose-400"> · {overdueInvoices.length} overdue</span>
               )}
             </p>
           </div>
@@ -290,7 +290,11 @@ export const DashboardPage: React.FC = () => {
                       <td className="font-medium">{client.name}</td>
                       <td className="text-ink-secondary">{client.companyName || '—'}</td>
                       <td className="money text-right">{formatCurrency(clientPaid, currency, symbol)}</td>
-                      <td className={`money text-right ${clientDue > 0 ? 'text-[#8E3B32]' : 'text-ink-secondary'}`}>
+                      <td
+                        className={`money text-right ${
+                          clientDue > 0 ? 'text-[#8E3B32] dark:text-rose-400' : 'text-ink-secondary'
+                        }`}
+                      >
                         {clientDue > 0 ? formatCurrency(clientDue, currency, symbol) : 'Clear'}
                       </td>
                     </tr>

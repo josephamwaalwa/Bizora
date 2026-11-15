@@ -1,9 +1,12 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { PrintableDocument } from './PrintableDocument';
 import { Button } from '../common/Button';
+import { generateDocumentPdfBytes } from '../../services/pdfGenerator';
+import { buildDocumentPdfFilename, exportPdfFile } from '../../services/fileOperations';
 import {
   Printer,
+  Download,
   Edit2,
   Copy,
   ArrowRight,
@@ -16,6 +19,8 @@ import type { Quotation, Invoice, QuotationStatus, InvoiceStatus } from '../../t
 export const DocumentPreviewModal: React.FC = () => {
   const {
     previewDocument,
+    quotations,
+    invoices,
     closeDocumentPreview,
     setActiveView,
     duplicateQuotation,
@@ -24,14 +29,70 @@ export const DocumentPreviewModal: React.FC = () => {
     updateQuotationStatus,
     updateInvoiceStatus,
     openPaymentModal,
+    addToast,
   } = useApp();
+
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
 
   if (!previewDocument) return null;
 
   const { type, data } = previewDocument;
   const isInvoice = type === 'invoice';
-  const invoice = isInvoice ? (data as Invoice) : null;
-  const quote = !isInvoice ? (data as Quotation) : null;
+
+  // Always resolve the latest stored copy if available so edits/payments stay fresh
+  const liveDocument = isInvoice
+    ? invoices.find((inv) => inv.id === data.id) || (data as Invoice)
+    : quotations.find((quo) => quo.id === data.id) || (data as Quotation);
+
+  const invoice = isInvoice ? (liveDocument as Invoice) : null;
+  const quote = !isInvoice ? (liveDocument as Quotation) : null;
+
+  const documentNumber = isInvoice
+    ? invoice?.invoiceNumber || ''
+    : quote?.quotationNumber || '';
+
+  // Resolve linked quotation number (handles both IDs like 'quo_1' and human numbers like 'QUO-0001')
+  const resolvedQuoteRef = (() => {
+    if (!isInvoice || !invoice?.quotationId) return undefined;
+    const rawRef = invoice.quotationId.trim();
+    if (!rawRef) return undefined;
+    const matchedQuote = quotations.find(
+      (q) => q.id === rawRef || q.quotationNumber === rawRef
+    );
+    return matchedQuote ? matchedQuote.quotationNumber : rawRef;
+  })();
+
+  const handleDownloadPdf = async () => {
+    if (isExportingPdf) return;
+    setIsExportingPdf(true);
+
+    try {
+      const pdfBytes = await generateDocumentPdfBytes({
+        type,
+        document: liveDocument,
+        quoteRefLabel: resolvedQuoteRef,
+      });
+      const fileName = buildDocumentPdfFilename(type, documentNumber);
+      const result = await exportPdfFile(fileName, pdfBytes);
+
+      if (result === 'saved') {
+        addToast({
+          type: 'success',
+          title: 'PDF Saved',
+          message: `${fileName} has been saved successfully.`,
+        });
+      }
+    } catch (error) {
+      console.error('Failed to generate or save PDF:', error);
+      addToast({
+        type: 'error',
+        title: 'PDF Export Failed',
+        message: 'Could not generate or save the PDF file. Please try again.',
+      });
+    } finally {
+      setIsExportingPdf(false);
+    }
+  };
 
   const handlePrint = () => {
     window.print();
@@ -77,7 +138,7 @@ export const DocumentPreviewModal: React.FC = () => {
             {isInvoice ? 'Invoice' : 'Quotation'}
           </span>
           <span className="font-mono text-sm font-bold text-white tracking-wide">
-            {isInvoice ? invoice?.invoiceNumber : quote?.quotationNumber}
+            {documentNumber}
           </span>
         </div>
 
@@ -164,12 +225,23 @@ export const DocumentPreviewModal: React.FC = () => {
           </Button>
 
           <Button
-            variant="primary"
+            variant="secondary"
             size="sm"
             leftIcon={<Printer className="w-3.5 h-3.5" />}
             onClick={handlePrint}
           >
-            Print / Save PDF
+            Print
+          </Button>
+
+          <Button
+            variant="primary"
+            size="sm"
+            leftIcon={<Download className="w-3.5 h-3.5" />}
+            onClick={handleDownloadPdf}
+            disabled={isExportingPdf}
+            isLoading={isExportingPdf}
+          >
+            {isExportingPdf ? 'Generating PDF...' : 'Download PDF'}
           </Button>
 
           <button
@@ -183,8 +255,12 @@ export const DocumentPreviewModal: React.FC = () => {
       </div>
 
       {/* Desk Preview Container */}
-      <div className="document-preview-sheet py-8 sm:py-12 px-3 sm:px-6 flex justify-center bg-slate-200/60 print:bg-white print:p-0">
-        <PrintableDocument document={data} type={type} />
+      <div className="document-preview-sheet py-8 sm:py-12 px-3 sm:px-6 flex justify-center bg-slate-200/60 dark:bg-[#0B1220] print:bg-white print:p-0">
+        <PrintableDocument
+          document={liveDocument}
+          type={type}
+          quoteRefLabel={resolvedQuoteRef}
+        />
       </div>
     </div>
   );

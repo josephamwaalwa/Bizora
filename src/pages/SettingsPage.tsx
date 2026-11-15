@@ -8,7 +8,6 @@ import { Textarea } from '../components/common/Textarea';
 import type { BusinessProfile, CurrencyCode } from '../types';
 import { StorageService } from '../services/storage';
 import { exportJsonBackupFile, pickAndReadJsonBackupInTauri } from '../services/fileOperations';
-import { getLogoOptions } from '../utils/logo';
 import { BusinessAvatar } from '../components/common/BusinessAvatar';
 import {
   Building2,
@@ -38,7 +37,6 @@ export const SettingsPage: React.FC = () => {
 
   const [profile, setProfile] = useState<BusinessProfile>({ ...businessProfile });
   const [logoPreview, setLogoPreview] = useState<string>(businessProfile.logoUrl || '');
-  const logoOptions = getLogoOptions(profile);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const importFileRef = useRef<HTMLInputElement>(null);
 
@@ -168,13 +166,13 @@ export const SettingsPage: React.FC = () => {
   return (
     <div className="space-y-6 pb-20">
       {/* Page Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-200/80">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-line">
         <div>
-          <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 block mb-0.5">
+          <span className="text-[10px] font-bold uppercase tracking-widest text-ink-muted block mb-0.5">
             System Preferences
           </span>
-          <h2 className="text-xl font-bold text-slate-900 tracking-tight">Business Settings</h2>
-          <p className="text-xs text-slate-500 mt-0.5">
+          <h2 className="text-xl font-bold text-ink tracking-tight">Business Settings</h2>
+          <p className="text-xs text-ink-secondary mt-0.5">
             Configure enterprise profile, tax parameters, currency formatting, and document numbering.
           </p>
         </div>
@@ -186,18 +184,18 @@ export const SettingsPage: React.FC = () => {
       <form onSubmit={handleSubmit} className="settings-form space-y-6">
         {/* 1. Brand & Business Profile */}
         <Card padding="md" className="space-y-5">
-          <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
-            <Building2 className="w-5 h-5 text-indigo-600" />
+          <div className="flex items-center gap-2 border-b border-line pb-3">
+            <Building2 className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
             <div>
-              <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">
+              <h3 className="text-sm font-bold text-ink uppercase tracking-wider">
                 Business Information & Branding
               </h3>
-              <p className="text-xs text-slate-500">Appears on all exported quotations and invoices.</p>
+              <p className="text-xs text-ink-secondary">Appears on all exported quotations and invoices.</p>
             </div>
           </div>
 
           {/* Logo Upload Section */}
-          <div className="flex flex-col sm:flex-row sm:items-center gap-5 p-4 rounded-xl border border-slate-200 bg-slate-50/50">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-5 p-4 rounded-xl border border-line bg-paper-sunken">
             <div className="flex h-20 w-24 items-center justify-center shrink-0">
               <BusinessAvatar
                 name={profile.name}
@@ -208,8 +206,8 @@ export const SettingsPage: React.FC = () => {
             </div>
 
             <div className="space-y-2">
-              <span className="text-xs font-semibold text-slate-800 block">Business Logo</span>
-              <p className="text-xs text-slate-500">
+              <span className="text-xs font-semibold text-ink block">Business Logo</span>
+              <p className="text-xs text-ink-secondary">
                 Recommended: PNG, SVG, or JPG with a transparent or white background (max 2MB).
               </p>
               <div className="flex items-center gap-2">
@@ -235,7 +233,7 @@ export const SettingsPage: React.FC = () => {
                     variant="outline"
                     size="sm"
                     onClick={handleRemoveLogo}
-                    className="text-rose-600 hover:text-rose-700 hover:bg-rose-50 border-rose-200"
+                    className="text-rose-600 dark:text-rose-400 hover:text-rose-700 dark:hover:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-950/50 border-rose-200 dark:border-rose-800/70"
                     leftIcon={<Trash2 className="w-3.5 h-3.5" />}
                   >
                     Remove
@@ -243,67 +241,6 @@ export const SettingsPage: React.FC = () => {
                 )}
               </div>
             </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            <Input
-              label="Logo size (px)"
-              type="number"
-              min="40"
-              max="220"
-              step="4"
-              value={logoOptions.size}
-              onChange={(e) => handleChange('logoSize', Number(e.target.value))}
-              helperText="Controls the maximum width in document headers."
-            />
-            <Select
-              label="Logo fitting"
-              value={logoOptions.fit}
-              onChange={(e) => handleChange('logoFit', e.target.value as 'contain' | 'cover')}
-              options={[
-                { value: 'contain', label: 'Contain (show full logo)' },
-                { value: 'cover', label: 'Cover (fill logo area)' },
-              ]}
-            />
-            <Select
-              label="Logo alignment"
-              value={logoOptions.alignment}
-              onChange={(e) => handleChange('logoAlignment', e.target.value as 'left' | 'center' | 'right')}
-              options={[
-                { value: 'left', label: 'Left' },
-                { value: 'center', label: 'Center' },
-                { value: 'right', label: 'Right' },
-              ]}
-            />
-            <Input
-              label="Logo padding (px)"
-              type="number"
-              min="0"
-              max="24"
-              step="1"
-              value={logoOptions.padding}
-              onChange={(e) => handleChange('logoPadding', Number(e.target.value))}
-              helperText="Space inside the logo area, without adding a border."
-            />
-            <label className="flex items-center gap-2 self-end pb-3 text-sm text-slate-700">
-              <input
-                type="checkbox"
-                checked={profile.logoBackgroundTransparent ?? true}
-                onChange={(e) => handleChange('logoBackgroundTransparent', e.target.checked)}
-                className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-              />
-              Transparent logo background
-            </label>
-            <label className="block text-sm font-medium text-slate-700">
-              Logo background colour
-              <input
-                type="color"
-                value={profile.logoBackgroundColor || '#ffffff'}
-                onChange={(e) => handleChange('logoBackgroundColor', e.target.value)}
-                disabled={profile.logoBackgroundTransparent ?? true}
-                className="mt-2 block h-11 w-full rounded border border-slate-300 bg-white p-1 disabled:opacity-50"
-              />
-            </label>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -387,13 +324,13 @@ export const SettingsPage: React.FC = () => {
 
         {/* 2. Currency & Configurable Tax Settings */}
         <Card padding="md" className="space-y-5">
-          <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
-            <DollarSign className="w-5 h-5 text-teal-600" />
+          <div className="flex items-center gap-2 border-b border-line pb-3">
+            <DollarSign className="w-5 h-5 text-teal-600 dark:text-teal-400" />
             <div>
-              <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">
+              <h3 className="text-sm font-bold text-ink uppercase tracking-wider">
                 Currency & Tax Preferences
               </h3>
-              <p className="text-xs text-slate-500">Default financial configuration for all new documents.</p>
+              <p className="text-xs text-ink-secondary">Default financial configuration for all new documents.</p>
             </div>
           </div>
 
@@ -433,22 +370,22 @@ export const SettingsPage: React.FC = () => {
           </div>
 
           {/* Configurable Tax Section */}
-          <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/60 space-y-3">
+          <div className="p-4 rounded-xl border border-line bg-paper-sunken space-y-3">
             <div className="flex items-center justify-between">
               <div>
-                <span className="text-xs font-bold text-slate-800 uppercase tracking-wider block">
+                <span className="text-xs font-bold text-ink uppercase tracking-wider block">
                   Configurable Tax Rate
                 </span>
-                <p className="text-xs text-slate-500">
+                <p className="text-xs text-ink-secondary">
                   Tax rates are not hardcoded. Configure your applicable rate (e.g. 15% VAT in Namibia, or 0% for non-registered entities).
                 </p>
               </div>
-              <label className="flex items-center gap-2 cursor-pointer text-xs font-semibold text-slate-700">
+              <label className="flex items-center gap-2 cursor-pointer text-xs font-semibold text-ink">
                 <input
                   type="checkbox"
                   checked={profile.isTaxEnabled}
                   onChange={(e) => handleChange('isTaxEnabled', e.target.checked)}
-                  className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                  className="rounded border-line-strong text-indigo-600 focus:ring-indigo-500"
                 />
                 <span>Enable Tax</span>
               </label>
@@ -480,19 +417,19 @@ export const SettingsPage: React.FC = () => {
 
         {/* 3. Document Numbering Preferences */}
         <Card padding="md" className="space-y-5">
-          <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
-            <Receipt className="w-5 h-5 text-indigo-600" />
+          <div className="flex items-center gap-2 border-b border-line pb-3">
+            <Receipt className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
             <div>
-              <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">
+              <h3 className="text-sm font-bold text-ink uppercase tracking-wider">
                 Document Numbering Preferences
               </h3>
-              <p className="text-xs text-slate-500">Control sequential numbering for quotes and invoices.</p>
+              <p className="text-xs text-ink-secondary">Control sequential numbering for quotes and invoices.</p>
             </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-            <div className="space-y-3 p-4 rounded-xl border border-slate-200 bg-slate-50/40">
-              <span className="text-xs font-bold uppercase tracking-wider text-indigo-900 block">
+            <div className="space-y-3 p-4 rounded-xl border border-line bg-paper-sunken">
+              <span className="text-xs font-bold uppercase tracking-wider text-indigo-900 dark:text-indigo-300 block">
                 Quotations Numbering
               </span>
               <div className="grid grid-cols-2 gap-3">
@@ -510,13 +447,13 @@ export const SettingsPage: React.FC = () => {
                   onChange={(e) => handleChange('nextQuoteNumber', parseInt(e.target.value, 10) || 1)}
                 />
               </div>
-              <p className="text-[11px] text-slate-500">
-                Next quote preview: <strong>{profile.quotePrefix}{String(profile.nextQuoteNumber).padStart(4, '0')}</strong>
+              <p className="text-[11px] text-ink-secondary">
+                Next quote preview: <strong className="text-ink">{profile.quotePrefix}{String(profile.nextQuoteNumber).padStart(4, '0')}</strong>
               </p>
             </div>
 
-            <div className="space-y-3 p-4 rounded-xl border border-slate-200 bg-slate-50/40">
-              <span className="text-xs font-bold uppercase tracking-wider text-teal-900 block">
+            <div className="space-y-3 p-4 rounded-xl border border-line bg-paper-sunken">
+              <span className="text-xs font-bold uppercase tracking-wider text-teal-900 dark:text-teal-300 block">
                 Invoices Numbering
               </span>
               <div className="grid grid-cols-2 gap-3">
@@ -534,8 +471,8 @@ export const SettingsPage: React.FC = () => {
                   onChange={(e) => handleChange('nextInvoiceNumber', parseInt(e.target.value, 10) || 1)}
                 />
               </div>
-              <p className="text-[11px] text-slate-500">
-                Next invoice preview: <strong>{profile.invoicePrefix}{String(profile.nextInvoiceNumber).padStart(4, '0')}</strong>
+              <p className="text-[11px] text-ink-secondary">
+                Next invoice preview: <strong className="text-ink">{profile.invoicePrefix}{String(profile.nextInvoiceNumber).padStart(4, '0')}</strong>
               </p>
             </div>
           </div>
@@ -543,13 +480,13 @@ export const SettingsPage: React.FC = () => {
 
         {/* 4. Banking & Payment Instructions */}
         <Card padding="md" className="space-y-5">
-          <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
-            <CreditCard className="w-5 h-5 text-teal-600" />
+          <div className="flex items-center gap-2 border-b border-line pb-3">
+            <CreditCard className="w-5 h-5 text-teal-600 dark:text-teal-400" />
             <div>
-              <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">
+              <h3 className="text-sm font-bold text-ink uppercase tracking-wider">
                 Bank & Payment Instructions
               </h3>
-              <p className="text-xs text-slate-500">Rendered in the payment details box of generated documents.</p>
+              <p className="text-xs text-ink-secondary">Rendered in the payment details box of generated documents.</p>
             </div>
           </div>
 
@@ -592,13 +529,13 @@ export const SettingsPage: React.FC = () => {
 
         {/* 5. Default Terms & Conditions */}
         <Card padding="md" className="space-y-4">
-          <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
-            <FileText className="w-5 h-5 text-indigo-600" />
+          <div className="flex items-center gap-2 border-b border-line pb-3">
+            <FileText className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
             <div>
-              <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">
+              <h3 className="text-sm font-bold text-ink uppercase tracking-wider">
                 Default Terms & Notes
               </h3>
-              <p className="text-xs text-slate-500">Pre-populated into newly created quotes and invoices.</p>
+              <p className="text-xs text-ink-secondary">Pre-populated into newly created quotes and invoices.</p>
             </div>
           </div>
 
@@ -625,25 +562,25 @@ export const SettingsPage: React.FC = () => {
         </Card>
 
         {/* 6. Data Management & LocalStorage Architecture */}
-        <Card padding="md" className="space-y-4 border-slate-300">
-          <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
-            <Database className="w-5 h-5 text-indigo-600" />
+        <Card padding="md" className="space-y-4 border-line-strong">
+          <div className="flex items-center gap-2 border-b border-line pb-3">
+            <Database className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
             <div>
-              <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">
+              <h3 className="text-sm font-bold text-ink uppercase tracking-wider">
                 Data Storage & Supabase Cloud Readiness
               </h3>
-              <p className="text-xs text-slate-500">
-                Current data persistence mode: <strong>Browser LocalStorage</strong>.
+              <p className="text-xs text-ink-secondary">
+                Current data persistence mode: <strong className="text-ink">Browser LocalStorage</strong>.
               </p>
             </div>
           </div>
 
-          <div className="p-4 rounded-xl bg-indigo-50/50 border border-indigo-100 text-xs text-indigo-950 space-y-1.5 leading-relaxed">
+          <div className="p-4 rounded-xl bg-indigo-50/50 dark:bg-indigo-950/40 border border-indigo-100 dark:border-indigo-800/60 text-xs text-indigo-950 dark:text-indigo-200 space-y-1.5 leading-relaxed">
             <p className="font-semibold flex items-center gap-1.5">
-              <CheckCircle2 className="w-4 h-4 text-indigo-600" />
+              <CheckCircle2 className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
               <span>Architected for Seamless Supabase Integration</span>
             </p>
-            <p className="text-indigo-900/80">
+            <p className="text-indigo-900/80 dark:text-indigo-200/80">
               All documents, clients, items, and settings are decoupled through an abstraction repository. In a future update, connecting your Supabase project URL and API key will enable multi-user cloud synchronization without changing domain models.
             </p>
           </div>
@@ -691,7 +628,7 @@ export const SettingsPage: React.FC = () => {
                     onConfirm: resetToDemoData,
                   });
                 }}
-                leftIcon={<RefreshCw className="w-3.5 h-3.5 text-indigo-600" />}
+                leftIcon={<RefreshCw className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />}
               >
                 Restore Demo Data
               </Button>
@@ -700,7 +637,7 @@ export const SettingsPage: React.FC = () => {
                 type="button"
                 variant="outline"
                 size="sm"
-                className="text-rose-600 hover:bg-rose-50 border-rose-200"
+                className="text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/50 border-rose-200 dark:border-rose-800/70"
                 onClick={() => {
                   showConfirmDialog({
                     title: 'Clear All Data & Start Fresh?',
@@ -710,7 +647,7 @@ export const SettingsPage: React.FC = () => {
                     onConfirm: clearAllData,
                   });
                 }}
-                leftIcon={<AlertTriangle className="w-3.5 h-3.5 text-rose-600" />}
+                leftIcon={<AlertTriangle className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400" />}
               >
                 Clear All Data
               </Button>

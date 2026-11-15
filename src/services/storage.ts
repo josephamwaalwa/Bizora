@@ -142,11 +142,23 @@ function dehydrateSnapshotLogo<T extends { businessSnapshot: BusinessProfile }>(
 
 function hydrateDocument<T extends { businessSnapshot: BusinessProfile }>(
   doc: T,
-  profileLogoUrl: string,
+  profile: BusinessProfile,
   cache: Record<string, string>
 ): T {
+  const profileLogoUrl = profile?.logoUrl || '';
   const rawLogo = doc.businessSnapshot?.logoUrl;
-  if (!rawLogo) return doc;
+  if (!rawLogo) {
+    if (profileLogoUrl && doc.businessSnapshot?.id === profile.id) {
+      return {
+        ...doc,
+        businessSnapshot: {
+          ...doc.businessSnapshot,
+          logoUrl: profileLogoUrl,
+        },
+      };
+    }
+    return doc;
+  }
   const resolved = resolveLogoUrl(rawLogo, profileLogoUrl, cache);
   if (resolved === rawLogo) return doc;
   return {
@@ -250,23 +262,27 @@ export const StorageService = {
     const emptyProfile: BusinessProfile = {
       ...initialBusinessProfile,
       name: 'My Business',
-      tagline: 'Professional Services',
+      tagline: '',
       logoUrl: '',
       email: '',
       phone: '',
       address: '',
-      city: 'Windhoek',
-      country: 'Namibia',
+      city: '',
+      country: '',
+      postalCode: '',
       website: '',
       taxNumber: '',
       registrationNumber: '',
       nextQuoteNumber: 1,
       nextInvoiceNumber: 1,
+      defaultNotes: '',
       bankDetails: {
         bankName: '',
         accountName: '',
         accountNumber: '',
         branchCode: '',
+        accountType: '',
+        swiftCode: '',
       },
       updatedAt: new Date().toISOString(),
     };
@@ -428,10 +444,10 @@ export const StorageService = {
 
   // Quotations
   getQuotations(): Quotation[] {
-    const profileLogoUrl = this.getBusinessProfile().logoUrl || '';
+    const profile = this.getBusinessProfile();
     const cache = getLogoCache();
     const rawQuotes = safeGet<Quotation[]>(KEYS.QUOTATIONS, []);
-    return rawQuotes.map((q) => hydrateDocument(q, profileLogoUrl, cache));
+    return rawQuotes.map((q) => hydrateDocument(q, profile, cache));
   },
 
   getQuotationById(id: string): Quotation | undefined {
@@ -479,10 +495,10 @@ export const StorageService = {
 
   // Invoices
   getInvoices(): Invoice[] {
-    const profileLogoUrl = this.getBusinessProfile().logoUrl || '';
+    const profile = this.getBusinessProfile();
     const cache = getLogoCache();
     const rawInvoices = safeGet<Invoice[]>(KEYS.INVOICES, []);
-    return rawInvoices.map((inv) => hydrateDocument(inv, profileLogoUrl, cache));
+    return rawInvoices.map((inv) => hydrateDocument(inv, profile, cache));
   },
 
   getInvoiceById(id: string): Invoice | undefined {

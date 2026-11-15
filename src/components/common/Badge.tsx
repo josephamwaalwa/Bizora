@@ -14,9 +14,9 @@ export interface BadgeProps {
 const toneDot: Record<string, string> = {
   default: 'bg-ink-muted',
   neutral: 'bg-ink-muted',
-  success: 'bg-teal-700',
-  warning: 'bg-[#8A5A12]',
-  danger: 'bg-[#8E3B32]',
+  success: 'bg-teal-700 dark:bg-teal-500',
+  warning: 'bg-[#8A5A12] dark:bg-amber-400',
+  danger: 'bg-[#8E3B32] dark:bg-rose-400',
   info: 'bg-ink',
 };
 

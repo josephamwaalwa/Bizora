@@ -20,7 +20,7 @@ export const Button: React.FC<ButtonProps> = ({
   ...props
 }) => {
   const baseStyles =
-    'inline-flex items-center justify-center font-medium tracking-normal transition-colors duration-150 rounded-sm focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-600 focus-visible:ring-offset-2 focus-visible:ring-offset-paper disabled:opacity-50 disabled:cursor-not-allowed select-none';
+    'inline-flex items-center justify-center font-medium tracking-normal transition-colors duration-150 rounded-sm focus:outline-none focus-visible:ring-1 focus-visible:ring-indigo-500 focus-visible:ring-offset-2 focus-visible:ring-offset-paper disabled:opacity-50 disabled:cursor-not-allowed select-none';
 
   const sizeStyles = {
     sm: 'h-10 px-3.5 text-[15px] gap-2',
@@ -29,13 +29,13 @@ export const Button: React.FC<ButtonProps> = ({
   }[size];
 
   const variantStyles = {
-    primary: 'bg-indigo-600 hover:bg-indigo-700 text-white',
-    indigo: 'bg-indigo-600 hover:bg-indigo-700 text-white',
-    secondary: 'bg-white hover:bg-paper-sunken text-ink border border-line-strong',
+    primary: 'bg-indigo-600 hover:bg-indigo-700 dark:bg-indigo-500 dark:hover:bg-indigo-600 text-white',
+    indigo: 'bg-indigo-600 hover:bg-indigo-700 dark:bg-indigo-500 dark:hover:bg-indigo-600 text-white',
+    secondary: 'bg-surface hover:bg-paper-sunken text-ink border border-line-strong',
     outline: 'bg-transparent border border-line-strong text-ink hover:bg-paper-sunken',
     ghost: 'bg-transparent text-ink-secondary hover:text-ink hover:bg-paper-sunken',
-    danger: 'bg-[#8E3B32] hover:bg-[#742F28] text-white',
-    success: 'bg-teal-700 hover:bg-teal-800 text-white',
+    danger: 'bg-[#8E3B32] hover:bg-[#742F28] dark:bg-rose-600 dark:hover:bg-rose-700 text-white',
+    success: 'bg-teal-700 hover:bg-teal-800 dark:bg-teal-600 dark:hover:bg-teal-700 text-white',
   }[variant];
 
   return (

@@ -64,11 +64,19 @@ export function getQuotationStatusConfig(status: QuotationStatus): {
 } {
   switch (status) {
     case 'accepted':
-      return { label: 'Accepted', badgeClass: 'text-teal-800', dotClass: 'bg-teal-700' };
+      return {
+        label: 'Accepted',
+        badgeClass: 'text-teal-800 dark:text-teal-400',
+        dotClass: 'bg-teal-700 dark:bg-teal-400',
+      };
     case 'sent':
       return { label: 'Sent', badgeClass: 'text-ink', dotClass: 'bg-ink' };
     case 'declined':
-      return { label: 'Declined', badgeClass: 'text-[#8E3B32]', dotClass: 'bg-[#8E3B32]' };
+      return {
+        label: 'Declined',
+        badgeClass: 'text-[#8E3B32] dark:text-rose-400',
+        dotClass: 'bg-[#8E3B32] dark:bg-rose-400',
+      };
     case 'expired':
       return { label: 'Expired', badgeClass: 'text-ink-muted', dotClass: 'bg-ink-muted' };
     case 'draft':
@@ -87,11 +95,23 @@ export function getInvoiceStatusConfig(status: InvoiceStatus): {
 } {
   switch (status) {
     case 'paid':
-      return { label: 'Paid', badgeClass: 'text-teal-800', dotClass: 'bg-teal-700' };
+      return {
+        label: 'Paid',
+        badgeClass: 'text-teal-800 dark:text-teal-400',
+        dotClass: 'bg-teal-700 dark:bg-teal-400',
+      };
     case 'partially_paid':
-      return { label: 'Partially paid', badgeClass: 'text-[#8A5A12]', dotClass: 'bg-[#8A5A12]' };
+      return {
+        label: 'Partially paid',
+        badgeClass: 'text-[#8A5A12] dark:text-amber-400',
+        dotClass: 'bg-[#8A5A12] dark:bg-amber-400',
+      };
     case 'overdue':
-      return { label: 'Overdue', badgeClass: 'text-[#8E3B32]', dotClass: 'bg-[#8E3B32]' };
+      return {
+        label: 'Overdue',
+        badgeClass: 'text-[#8E3B32] dark:text-rose-400',
+        dotClass: 'bg-[#8E3B32] dark:bg-rose-400',
+      };
     case 'sent':
       return { label: 'Sent', badgeClass: 'text-ink', dotClass: 'bg-ink' };
     case 'draft':

@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import type { BusinessProfile } from '../../types';
-import { getLogoOptions } from '../../utils/logo';
 
 interface DocumentLogoProps {
   business: BusinessProfile;
@@ -11,23 +10,20 @@ interface DocumentLogoProps {
 
 export const DocumentLogo: React.FC<DocumentLogoProps> = ({
   business,
-  maxWidth,
+  maxWidth = 112,
   maxHeight = 52,
   className = '',
 }) => {
   const [failedLogoUrl, setFailedLogoUrl] = useState<string | null>(null);
-  const logo = getLogoOptions(business);
   const showLogo = Boolean(business.logoUrl && failedLogoUrl !== business.logoUrl);
 
   if (!showLogo) return null;
-
-  const resolvedMaxWidth = maxWidth ?? Math.min(Math.max(logo.size, 44), 140);
 
   return (
     <div
       className={`document-logo ${className}`.trim()}
       style={{
-        maxWidth: `${resolvedMaxWidth}px`,
+        maxWidth: `${maxWidth}px`,
         maxHeight: `${maxHeight}px`,
       }}
     >
@@ -36,7 +32,7 @@ export const DocumentLogo: React.FC<DocumentLogoProps> = ({
         alt={`${business.name} logo`}
         onError={() => setFailedLogoUrl(business.logoUrl)}
         style={{
-          maxWidth: `${resolvedMaxWidth}px`,
+          maxWidth: `${maxWidth}px`,
           maxHeight: `${maxHeight}px`,
         }}
       />

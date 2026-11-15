@@ -1,11 +1,70 @@
 import { isTauri } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
-import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
+import { readTextFile, writeFile, writeTextFile } from '@tauri-apps/plugin-fs';
 
 export type ExportBackupResult = 'saved' | 'cancelled';
 export type ImportBackupResult =
   | { status: 'selected'; content: string }
   | { status: 'cancelled' };
+
+/**
+ * Sanitizes a document number for safe use in Windows/cross-platform filenames
+ * and builds a standard PDF filename (e.g. Quotation-QUO-0001.pdf).
+ */
+export function buildDocumentPdfFilename(
+  type: 'quote' | 'invoice',
+  documentNumber: string
+): string {
+  const prefix = type === 'invoice' ? 'Invoice' : 'Quotation';
+  const cleaned = (documentNumber || '')
+    .trim()
+    .replace(/[\\/:*?"<>|]/g, '-')
+    .replace(/\s+/g, '-');
+
+  return cleaned ? `${prefix}-${cleaned}.pdf` : `${prefix}.pdf`;
+}
+
+/**
+ * Exports a binary PDF using the native Windows Save dialog in Tauri
+ * or a browser Blob download when running in a standard web browser.
+ */
+export async function exportPdfFile(
+  defaultFileName: string,
+  pdfBytes: Uint8Array
+): Promise<ExportBackupResult> {
+  if (isTauri()) {
+    const targetPath = await save({
+      title: 'Save PDF Document',
+      defaultPath: defaultFileName,
+      filters: [
+        {
+          name: 'PDF Document',
+          extensions: ['pdf'],
+        },
+      ],
+    });
+
+    if (!targetPath) {
+      return 'cancelled';
+    }
+
+    await writeFile(targetPath, pdfBytes);
+    return 'saved';
+  }
+
+  const copy = new Uint8Array(pdfBytes.byteLength);
+  copy.set(pdfBytes);
+  const blob = new Blob([copy.buffer], { type: 'application/pdf' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = defaultFileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return 'saved';
+}
 
 /**
  * Exports a JSON backup string using the native Windows Save dialog in Tauri

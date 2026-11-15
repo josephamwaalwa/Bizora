@@ -284,7 +284,7 @@ export const QuotationsPage: React.FC = () => {
 
                         <button
                           onClick={() => handleDelete(quo.id, quo.quotationNumber)}
-                          className="p-2 text-ink-muted hover:text-[#8E3B32]"
+                          className="p-2 text-ink-muted hover:text-[#8E3B32] dark:hover:text-rose-400"
                           title="Delete Quotation"
                         >
                           <Trash2 className="h-4 w-4" />

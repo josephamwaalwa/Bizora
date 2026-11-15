@@ -14,12 +14,6 @@ export interface BusinessProfile {
   name: string;
   tagline: string;
   logoUrl: string;
-  logoSize?: number;
-  logoFit?: 'contain' | 'cover';
-  logoAlignment?: 'left' | 'center' | 'right';
-  logoPadding?: number;
-  logoBackgroundTransparent?: boolean;
-  logoBackgroundColor?: string;
   email: string;
   phone: string;
   address: string;

@@ -123,7 +123,9 @@ export const InvoicesPage: React.FC = () => {
         </div>
         <div className="border-t border-line py-6 xl:border-l xl:border-line xl:pl-8">
           <p className="text-[14px] text-ink-secondary">Overdue</p>
-          <p className={`figure-sm mt-3 ${overdueCount > 0 ? 'text-[#8E3B32]' : ''}`}>{overdueCount}</p>
+          <p className={`figure-sm mt-3 ${overdueCount > 0 ? 'text-[#8E3B32] dark:text-rose-400' : ''}`}>
+            {overdueCount}
+          </p>
           <p className="meta mt-2">Past the due date</p>
         </div>
       </div>
@@ -191,11 +193,11 @@ export const InvoicesPage: React.FC = () => {
           onAction={() => setActiveView('invoice-new')}
         />
       ) : (
-        <div className="border border-slate-200/80 rounded-md bg-white shadow-subtle overflow-hidden">
+        <div className="border border-line rounded-md bg-surface shadow-subtle overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full text-left text-[15px] border-collapse">
               <thead>
-                <tr className="bg-slate-50/70 border-b border-slate-200 text-slate-500 text-xs uppercase tracking-wider font-semibold">
+                <tr className="bg-paper-sunken border-b border-line text-ink-muted text-xs uppercase tracking-wider font-semibold">
                   <th className="py-2.5 px-4 font-normal">Invoice #</th>
                   <th className="py-2.5 px-4 font-normal">Client</th>
                   <th className="py-2.5 px-3 font-normal">Issue Date</th>
@@ -206,43 +208,43 @@ export const InvoicesPage: React.FC = () => {
                   <th className="py-2.5 px-4 font-normal text-right">Actions</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100">
+              <tbody className="divide-y divide-line">
                 {filteredInvoices.map((inv) => (
                   <tr
                     key={inv.id}
-                    className="hover:bg-slate-50/60 transition-colors cursor-pointer"
+                    className="hover:bg-paper-sunken transition-colors cursor-pointer"
                     onClick={() => openDocumentPreview('invoice', inv)}
                   >
-                    <td className="py-3 px-4 font-mono font-bold text-slate-900">
+                    <td className="py-3 px-4 font-mono font-bold text-ink">
                       {inv.invoiceNumber}
                     </td>
 
                     <td className="py-3 px-4">
-                      <div className="font-semibold text-slate-800">{inv.clientSnapshot.name}</div>
+                      <div className="font-semibold text-ink">{inv.clientSnapshot.name}</div>
                       {inv.clientSnapshot.companyName && (
-                        <div className="text-[13px] text-slate-500">{inv.clientSnapshot.companyName}</div>
+                        <div className="text-[13px] text-ink-secondary">{inv.clientSnapshot.companyName}</div>
                       )}
                     </td>
 
-                    <td className="py-3 px-3 text-slate-600 font-mono text-[13px]">
+                    <td className="py-3 px-3 text-ink-secondary font-mono text-[13px]">
                       {formatDate(inv.issueDate)}
                     </td>
 
-                    <td className="py-3 px-3 text-slate-600 font-mono text-[13px]">
-                      <span className={inv.status === 'overdue' ? 'text-rose-800 font-semibold' : ''}>
+                    <td className="py-3 px-3 text-ink-secondary font-mono text-[13px]">
+                      <span className={inv.status === 'overdue' ? 'text-[#8E3B32] dark:text-rose-400 font-semibold' : ''}>
                         {formatDate(inv.dueDate)}
                       </span>
                     </td>
 
-                    <td className="money py-3 px-4 text-right font-medium text-slate-900">
+                    <td className="money py-3 px-4 text-right font-medium text-ink">
                       {formatCurrency(inv.grandTotal, inv.currency, inv.currencySymbol)}
                     </td>
 
                     <td className="money py-3 px-4 text-right font-bold">
                       {inv.status === 'paid' ? (
-                        <span className="text-slate-400 font-normal">Settled</span>
+                        <span className="text-ink-muted font-normal">Settled</span>
                       ) : (
-                        <span className="text-slate-900">
+                        <span className="text-ink">
                           {formatCurrency(inv.outstandingBalance, inv.currency, inv.currencySymbol)}
                         </span>
                       )}
@@ -260,7 +262,7 @@ export const InvoicesPage: React.FC = () => {
                         {inv.status !== 'paid' && (
                           <button
                             onClick={() => openPaymentModal(inv)}
-                            className="p-1 text-slate-500 hover:text-emerald-700 transition-colors rounded"
+                            className="p-1 text-ink-secondary hover:text-teal-700 dark:hover:text-teal-400 transition-colors rounded"
                             title="Record Payment"
                           >
                             <CreditCard className="w-3.5 h-3.5" />
@@ -269,7 +271,7 @@ export const InvoicesPage: React.FC = () => {
 
                         <button
                           onClick={() => openDocumentPreview('invoice', inv)}
-                          className="p-1 text-slate-400 hover:text-slate-800 transition-colors rounded"
+                          className="p-1 text-ink-muted hover:text-ink transition-colors rounded"
                           title="Inspect Document"
                         >
                           <Eye className="w-3.5 h-3.5" />
@@ -277,7 +279,7 @@ export const InvoicesPage: React.FC = () => {
 
                         <button
                           onClick={() => setActiveView('invoice-edit', inv.id)}
-                          className="p-1 text-slate-400 hover:text-slate-800 transition-colors rounded"
+                          className="p-1 text-ink-muted hover:text-ink transition-colors rounded"
                           title="Edit Invoice"
                         >
                           <Edit2 className="w-3.5 h-3.5" />
@@ -285,7 +287,7 @@ export const InvoicesPage: React.FC = () => {
 
                         <button
                           onClick={() => duplicateInvoice(inv.id)}
-                          className="p-1 text-slate-400 hover:text-slate-800 transition-colors rounded"
+                          className="p-1 text-ink-muted hover:text-ink transition-colors rounded"
                           title="Duplicate Invoice"
                         >
                           <Copy className="w-3.5 h-3.5" />
@@ -293,7 +295,7 @@ export const InvoicesPage: React.FC = () => {
 
                         <button
                           onClick={() => handleDelete(inv.id, inv.invoiceNumber)}
-                          className="p-1 text-slate-400 hover:text-rose-700 transition-colors rounded"
+                          className="p-1 text-ink-muted hover:text-[#8E3B32] dark:hover:text-rose-400 transition-colors rounded"
                           title="Delete Invoice"
                         >
                           <Trash2 className="w-3.5 h-3.5" />

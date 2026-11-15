@@ -12,7 +12,7 @@ export const Card: React.FC<CardProps> = ({
   className = '',
   ...props
 }) => {
-  const baseStyles = 'bg-white';
+  const baseStyles = 'bg-surface';
 
   const variantStyles = {
     default: 'border-t border-line',

@@ -51,7 +51,7 @@ export const RecordPaymentModal: React.FC = () => {
       onClose={closePaymentModal}
       title={
         <div className="flex items-center gap-2">
-          <CreditCard className="w-4 h-4 text-slate-700" />
+          <CreditCard className="w-4 h-4 text-ink-secondary" />
           <span>Record Payment • {invoice.invoiceNumber}</span>
         </div>
       }
@@ -60,16 +60,16 @@ export const RecordPaymentModal: React.FC = () => {
     >
       <form onSubmit={handleSubmit} className="space-y-4">
         {/* Balance Card: Flat and Structured */}
-        <div className="rounded border border-slate-200 bg-slate-50/70 p-3.5 flex justify-between items-center text-xs">
+        <div className="rounded border border-line bg-paper-sunken p-3.5 flex justify-between items-center text-xs">
           <div>
-            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Total Invoiced</span>
-            <span className="money font-semibold text-slate-800 text-sm">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-ink-muted block">Total Invoiced</span>
+            <span className="money font-semibold text-ink text-sm">
               {formatCurrency(invoice.grandTotal, invoice.currency, invoice.currencySymbol)}
             </span>
           </div>
           <div className="text-right">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Balance Outstanding</span>
-            <span className="money font-bold text-sm text-slate-900">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-ink-muted block">Balance Outstanding</span>
+            <span className="money font-bold text-sm text-ink">
               {formatCurrency(balance, invoice.currency, invoice.currencySymbol)}
             </span>
           </div>
@@ -131,7 +131,7 @@ export const RecordPaymentModal: React.FC = () => {
           onChange={(e) => setNotes(e.target.value)}
         />
 
-        <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200">
+        <div className="flex items-center justify-end gap-2 pt-3 border-t border-line">
           <Button variant="secondary" size="sm" type="button" onClick={closePaymentModal}>
             Cancel
           </Button>

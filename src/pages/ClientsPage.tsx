@@ -130,13 +130,13 @@ export const ClientsPage: React.FC = () => {
   return (
     <div className="space-y-6">
       {/* Top Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-200/80">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-line">
         <div>
-          <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400 block mb-0.5">
+          <span className="text-[10px] font-bold uppercase tracking-widest text-ink-muted block mb-0.5">
             Accounts & Contacts
           </span>
-          <h2 className="text-xl font-bold tracking-tight text-slate-900">Clients</h2>
-          <p className="text-xs text-slate-500 mt-0.5">
+          <h2 className="text-xl font-bold tracking-tight text-ink">Clients</h2>
+          <p className="text-xs text-ink-secondary mt-0.5">
             Maintain client records, company tax details, and inspect billing dossiers.
           </p>
         </div>
@@ -151,15 +151,15 @@ export const ClientsPage: React.FC = () => {
       </div>
 
       {/* Search Bar */}
-      <div className="p-3 bg-white border border-slate-200/80 rounded-md shadow-subtle">
+      <div className="p-3 bg-surface border border-line rounded-md shadow-subtle">
         <div className="relative max-w-sm">
-          <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+          <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-muted" />
           <input
             type="text"
             value={localSearch}
             onChange={(e) => setLocalSearch(e.target.value)}
             placeholder="Search by name, company, email or phone..."
-            className="w-full text-xs rounded border border-slate-300 pl-8 pr-2.5 py-1 focus:outline-none focus:border-slate-500"
+            className="w-full text-xs rounded border border-line-strong bg-surface text-ink placeholder:text-ink-muted pl-8 pr-2.5 py-1.5 focus:outline-none focus:border-indigo-500"
           />
         </div>
       </div>
@@ -167,7 +167,7 @@ export const ClientsPage: React.FC = () => {
       {/* Clients Grid */}
       {filteredClients.length === 0 ? (
         <EmptyState
-          icon={<Users className="w-6 h-6 text-slate-500" />}
+          icon={<Users className="w-6 h-6 text-ink-muted" />}
           title={clients.length === 0 ? 'No clients added yet' : 'No matching clients found'}
           description={
             clients.length === 0
@@ -189,20 +189,20 @@ export const ClientsPage: React.FC = () => {
               <div
                 key={client.id}
                 onClick={() => setActiveView('client-detail', client.id)}
-                className="border border-slate-200/80 rounded-md bg-white p-4 shadow-subtle hover:border-slate-300 transition-colors cursor-pointer flex flex-col justify-between"
+                className="border border-line rounded-md bg-surface p-4 shadow-subtle hover:border-line-strong transition-colors cursor-pointer flex flex-col justify-between"
               >
                 <div>
                   {/* Top Bar: Contact Name & Edit controls */}
-                  <div className="flex items-start justify-between gap-2 pb-3 border-b border-slate-100">
+                  <div className="flex items-start justify-between gap-2 pb-3 border-b border-line">
                     <div className="min-w-0">
-                      <h4 className="font-bold text-slate-900 text-sm truncate">{client.name}</h4>
+                      <h4 className="font-bold text-ink text-sm truncate">{client.name}</h4>
                       {client.companyName ? (
-                        <p className="text-xs text-slate-600 truncate flex items-center gap-1 mt-0.5">
-                          <Building className="w-3 h-3 text-slate-400 shrink-0" />
+                        <p className="text-xs text-ink-secondary truncate flex items-center gap-1 mt-0.5">
+                          <Building className="w-3 h-3 text-ink-muted shrink-0" />
                           <span>{client.companyName}</span>
                         </p>
                       ) : (
-                        <span className="text-[10px] text-slate-400 uppercase tracking-wider block mt-0.5">
+                        <span className="text-[10px] text-ink-muted uppercase tracking-wider block mt-0.5">
                           Individual Account
                         </span>
                       )}
@@ -211,14 +211,14 @@ export const ClientsPage: React.FC = () => {
                     <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
                       <button
                         onClick={() => openEditModal(client)}
-                        className="p-1 text-slate-400 hover:text-slate-800 transition-colors rounded"
+                        className="p-1 text-ink-muted hover:text-ink transition-colors rounded"
                         title="Edit Client"
                       >
                         <Edit2 className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={() => handleDelete(client.id, client.name)}
-                        className="p-1 text-slate-400 hover:text-rose-700 transition-colors rounded"
+                        className="p-1 text-ink-muted hover:text-[#8E3B32] dark:hover:text-rose-400 transition-colors rounded"
                         title="Delete Client"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -227,20 +227,20 @@ export const ClientsPage: React.FC = () => {
                   </div>
 
                   {/* Contact Details */}
-                  <div className="py-3 space-y-1 text-xs text-slate-600 font-sans">
+                  <div className="py-3 space-y-1 text-xs text-ink-secondary font-sans">
                     <div className="flex items-center gap-2 truncate">
-                      <Mail className="w-3 h-3 text-slate-400 shrink-0" />
+                      <Mail className="w-3 h-3 text-ink-muted shrink-0" />
                       <span className="truncate">{client.email}</span>
                     </div>
                     {client.phone && (
                       <div className="flex items-center gap-2 truncate">
-                        <Phone className="w-3 h-3 text-slate-400 shrink-0" />
+                        <Phone className="w-3 h-3 text-ink-muted shrink-0" />
                         <span className="truncate font-mono">{client.phone}</span>
                       </div>
                     )}
                     {client.address && (
-                      <div className="flex items-center gap-2 truncate text-[11px] text-slate-500">
-                        <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
+                      <div className="flex items-center gap-2 truncate text-[11px] text-ink-muted">
+                        <MapPin className="w-3 h-3 text-ink-muted shrink-0" />
                         <span className="truncate">{client.address}</span>
                       </div>
                     )}
@@ -248,25 +248,25 @@ export const ClientsPage: React.FC = () => {
                 </div>
 
                 {/* Footer Metrics */}
-                <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between text-xs">
-                  <div className="flex items-center gap-2.5 text-slate-500 text-[11px] font-mono">
+                <div className="pt-2.5 border-t border-line flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2.5 text-ink-secondary text-[11px] font-mono">
                     <span className="flex items-center gap-1">
-                      <FileText className="w-3 h-3 text-slate-400" />
+                      <FileText className="w-3 h-3 text-ink-muted" />
                       {clientQuotes.length}
                     </span>
                     <span className="flex items-center gap-1">
-                      <Receipt className="w-3 h-3 text-slate-400" />
+                      <Receipt className="w-3 h-3 text-ink-muted" />
                       {clientInvoices.length}
                     </span>
                   </div>
 
                   <div className="money text-right">
                     {totalClientDue > 0 ? (
-                      <span className="text-xs font-bold text-slate-900">
+                      <span className="text-xs font-bold text-ink">
                         Due: {formatCurrency(totalClientDue, currency, symbol)}
                       </span>
                     ) : (
-                      <span className="text-xs text-slate-500">
+                      <span className="text-xs text-ink-secondary">
                         Paid: {formatCurrency(totalClientPaid, currency, symbol)}
                       </span>
                     )}
@@ -288,7 +288,7 @@ export const ClientsPage: React.FC = () => {
       >
         <form onSubmit={handleSaveClient} className="space-y-4">
           {errorMsg && (
-            <div className="p-2.5 rounded bg-rose-50 border border-rose-200 text-rose-800 text-xs font-medium">
+            <div className="p-2.5 rounded bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-300 text-xs font-medium">
               {errorMsg}
             </div>
           )}
@@ -349,7 +349,7 @@ export const ClientsPage: React.FC = () => {
             rows={2}
           />
 
-          <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200">
+          <div className="flex items-center justify-end gap-2 pt-3 border-t border-line">
             <Button variant="secondary" size="sm" type="button" onClick={() => setIsModalOpen(false)}>
               Cancel
             </Button>

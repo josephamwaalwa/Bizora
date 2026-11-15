@@ -50,11 +50,11 @@ export const Modal: React.FC<ModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto">
-      <div className="fixed inset-0 bg-ink/50 transition-opacity" onClick={onClose} />
+      <div className="fixed inset-0 bg-ink/50 dark:bg-black/70 transition-opacity" onClick={onClose} />
 
       <div className="flex min-h-full items-center justify-center p-4 sm:p-8 text-center">
         <div
-          className={`relative w-full ${widthStyles} transform bg-white text-left shadow-modal my-6 border border-line`}
+          className={`relative w-full ${widthStyles} transform bg-surface text-left shadow-modal my-6 border border-line`}
           onClick={(e) => e.stopPropagation()}
         >
           {(title || showCloseButton) && (

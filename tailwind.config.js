@@ -1,5 +1,6 @@
 /** @type {import('tailwindcss').Config} */
 export default {
+  darkMode: 'class',
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx}",
@@ -8,17 +9,19 @@ export default {
     extend: {
       colors: {
         paper: {
-          DEFAULT: '#F8FAFC',
-          sunken: '#F1F5F9',
+          DEFAULT: 'rgb(var(--bg-paper) / <alpha-value>)',
+          sunken: 'rgb(var(--bg-paper-sunken) / <alpha-value>)',
         },
+        surface: 'rgb(var(--bg-surface) / <alpha-value>)',
+        sidebar: 'rgb(var(--bg-sidebar) / <alpha-value>)',
         ink: {
-          DEFAULT: '#1E293B',
-          secondary: '#475569',
-          muted: '#64748B',
+          DEFAULT: 'rgb(var(--text-ink) / <alpha-value>)',
+          secondary: 'rgb(var(--text-ink-secondary) / <alpha-value>)',
+          muted: 'rgb(var(--text-ink-muted) / <alpha-value>)',
         },
         line: {
-          DEFAULT: '#E2E8F0',
-          strong: '#CBD5E1',
+          DEFAULT: 'rgb(var(--border-line) / <alpha-value>)',
+          strong: 'rgb(var(--border-line-strong) / <alpha-value>)',
         },
         navy: {
           50: '#F0F3F9',

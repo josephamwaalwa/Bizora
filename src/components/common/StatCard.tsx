@@ -34,7 +34,11 @@ export const StatCard: React.FC<StatCardProps> = ({
           {trend && (
             <span
               className={`num font-medium ${
-                trend.isNeutral ? 'text-ink-secondary' : trend.isPositive ? 'text-teal-800' : 'text-[#8E3B32]'
+                trend.isNeutral
+                  ? 'text-ink-secondary'
+                  : trend.isPositive
+                    ? 'text-teal-800 dark:text-teal-400'
+                    : 'text-[#8E3B32] dark:text-rose-400'
               }`}
             >
               {trend.value}

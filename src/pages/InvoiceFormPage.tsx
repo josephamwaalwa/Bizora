@@ -110,10 +110,10 @@ export const InvoiceFormPage: React.FC = () => {
 
   // Notes & Terms
   const [notes, setNotes] = useState<string>(
-    existingInvoice?.notes ?? businessProfile.defaultNotes
+    existingInvoice ? existingInvoice.notes || '' : businessProfile.defaultNotes
   );
   const [terms, setTerms] = useState<string>(
-    existingInvoice?.terms ?? businessProfile.defaultTermsInvoice
+    existingInvoice ? existingInvoice.terms || '' : businessProfile.defaultTermsInvoice
   );
 
   const [errorMsg, setErrorMsg] = useState('');
@@ -249,10 +249,10 @@ export const InvoiceFormPage: React.FC = () => {
       updatedAt: new Date().toISOString(),
     };
 
-    saveInvoice(invoiceToSave);
+    const saved = saveInvoice(invoiceToSave);
 
     if (viewAfterSave) {
-      openDocumentPreview('invoice', invoiceToSave);
+      openDocumentPreview('invoice', saved);
     }
     setActiveView('invoices');
   };
@@ -260,7 +260,7 @@ export const InvoiceFormPage: React.FC = () => {
   return (
     <div className="space-y-6 pb-20">
       {/* Header Bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-200/80">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-line">
         <div className="flex items-center gap-3">
           <Button
             variant="secondary"
@@ -296,7 +296,7 @@ export const InvoiceFormPage: React.FC = () => {
       </div>
 
       {errorMsg && (
-        <div className="p-3 rounded bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center gap-2 font-medium">
+        <div className="p-3 rounded bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-300 text-xs flex items-center gap-2 font-medium">
           <AlertCircle className="w-4 h-4 shrink-0" />
           <span>{errorMsg}</span>
         </div>
@@ -307,56 +307,56 @@ export const InvoiceFormPage: React.FC = () => {
         {/* Left Form Area (8 cols) */}
         <div className="lg:col-span-8 space-y-6">
           {/* SECTION A: Business Information */}
-          <div className="border border-slate-200/80 rounded-md bg-white p-5 shadow-subtle space-y-3">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
-              <span className="text-xs font-bold uppercase tracking-wider text-slate-500 font-sans">
+          <div className="border border-line rounded-md bg-surface p-5 shadow-subtle space-y-3">
+            <div className="flex items-center justify-between border-b border-line pb-2.5">
+              <span className="text-xs font-bold uppercase tracking-wider text-ink-muted font-sans">
                 Sender Business Entity
               </span>
               <button
                 type="button"
                 onClick={() => setActiveView('settings')}
-                className="text-xs font-semibold text-slate-600 hover:text-slate-900"
+                className="text-xs font-semibold text-ink-secondary hover:text-ink"
               >
                 Configure in Settings
               </button>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs text-slate-600">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs text-ink-secondary">
               <div>
-                <span className="text-xs uppercase font-bold text-slate-400 block">Business</span>
-                <span className="font-semibold text-slate-900">{businessProfile.name}</span>
-                <p className="text-slate-500">{businessProfile.email}</p>
+                <span className="text-xs uppercase font-bold text-ink-muted block">Business</span>
+                <span className="font-semibold text-ink">{businessProfile.name}</span>
+                <p className="text-ink-secondary">{businessProfile.email}</p>
               </div>
               <div>
-                <span className="text-xs uppercase font-bold text-slate-400 block">Bank Account</span>
-                <span className="text-slate-700">{businessProfile.bankDetails.bankName || 'FNB Namibia'}</span>
-                <p className="font-mono text-slate-500">{businessProfile.bankDetails.accountNumber || 'Acc: Not set'}</p>
+                <span className="text-xs uppercase font-bold text-ink-muted block">Bank Account</span>
+                <span className="text-ink">{businessProfile.bankDetails.bankName || 'Not configured'}</span>
+                <p className="font-mono text-ink-secondary">{businessProfile.bankDetails.accountNumber || 'Account not set'}</p>
               </div>
               <div>
-                <span className="text-xs uppercase font-bold text-slate-400 block">Tax / TIN</span>
-                <span className="text-slate-700 font-mono">{businessProfile.taxNumber || 'No VAT set'}</span>
-                <p className="text-slate-500 font-mono">{businessProfile.defaultCurrency} ({businessProfile.currencySymbol})</p>
+                <span className="text-xs uppercase font-bold text-ink-muted block">Tax / TIN</span>
+                <span className="text-ink font-mono">{businessProfile.taxNumber || 'No VAT set'}</span>
+                <p className="text-ink-secondary font-mono">{businessProfile.defaultCurrency} ({businessProfile.currencySymbol})</p>
               </div>
             </div>
           </div>
 
           {/* SECTION B: Client Selection */}
-          <div className="border border-slate-200/80 rounded-md bg-white p-5 shadow-subtle space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
-              <span className="text-xs font-bold uppercase tracking-wider text-slate-500 font-sans">
+          <div className="border border-line rounded-md bg-surface p-5 shadow-subtle space-y-4">
+            <div className="flex items-center justify-between border-b border-line pb-2.5">
+              <span className="text-xs font-bold uppercase tracking-wider text-ink-muted font-sans">
                 Client (Bill To)
               </span>
               <button
                 type="button"
                 onClick={() => setIsAddingNewClient(!isAddingNewClient)}
-                className="text-xs font-semibold text-slate-700 hover:text-slate-900"
+                className="text-xs font-semibold text-ink-secondary hover:text-ink"
               >
                 {isAddingNewClient ? 'Select existing client' : '+ Quick add client'}
               </button>
             </div>
 
             {isAddingNewClient ? (
-              <div className="p-4 rounded border border-slate-200 bg-slate-50 space-y-3">
-                <span className="text-xs font-bold text-slate-800 uppercase tracking-wider block">
+              <div className="p-4 rounded border border-line bg-paper-sunken space-y-3">
+                <span className="text-xs font-bold text-ink uppercase tracking-wider block">
                   Quick Add Client Record
                 </span>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -405,12 +405,12 @@ export const InvoiceFormPage: React.FC = () => {
             ) : (
               <div>
                 {clients.length === 0 ? (
-                  <div className="text-xs text-slate-500 py-2">
+                  <div className="text-xs text-ink-secondary py-2">
                     No clients registered.{' '}
                     <button
                       type="button"
                       onClick={() => setIsAddingNewClient(true)}
-                      className="font-semibold text-slate-900 underline"
+                      className="font-semibold text-ink underline"
                     >
                       Click here to add one.
                     </button>
@@ -428,8 +428,8 @@ export const InvoiceFormPage: React.FC = () => {
                 )}
 
                 {currentClient && (
-                  <div className="mt-3 p-3 bg-slate-50 rounded text-xs space-y-0.5 text-slate-600 border border-slate-200">
-                    <p className="font-semibold text-slate-900">{currentClient.name}</p>
+                  <div className="mt-3 p-3 bg-paper-sunken rounded text-xs space-y-0.5 text-ink-secondary border border-line">
+                    <p className="font-semibold text-ink">{currentClient.name}</p>
                     {currentClient.companyName && <p>{currentClient.companyName}</p>}
                     <p>{currentClient.email} • {currentClient.phone}</p>
                     {currentClient.address && <p>{currentClient.address}</p>}
@@ -440,9 +440,9 @@ export const InvoiceFormPage: React.FC = () => {
           </div>
 
           {/* SECTION C & D: Line Items */}
-          <div className="border border-slate-200/80 rounded-md bg-white p-5 shadow-subtle space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
-              <span className="text-xs font-bold uppercase tracking-wider text-slate-500 font-sans">
+          <div className="border border-line rounded-md bg-surface p-5 shadow-subtle space-y-4">
+            <div className="flex items-center justify-between border-b border-line pb-2.5">
+              <span className="text-xs font-bold uppercase tracking-wider text-ink-muted font-sans">
                 Itemised Billed Services & Products
               </span>
               <Button
@@ -459,10 +459,10 @@ export const InvoiceFormPage: React.FC = () => {
               {items.map((item, index) => (
                 <div
                   key={item.id}
-                  className="p-3.5 rounded border border-slate-200 bg-slate-50/40 space-y-2.5"
+                  className="p-3.5 rounded border border-line bg-paper-sunken space-y-2.5"
                 >
                   <div className="flex items-start justify-between gap-2">
-                    <span className="text-xs font-mono text-slate-400 mt-2 font-bold">
+                    <span className="text-xs font-mono text-ink-muted mt-2 font-bold">
                       #{index + 1}
                     </span>
                     <div className="flex-1">
@@ -478,7 +478,7 @@ export const InvoiceFormPage: React.FC = () => {
                       <button
                         type="button"
                         onClick={() => handleRemoveItem(item.id)}
-                        className="mt-5 p-1.5 text-slate-400 hover:text-rose-700 transition-colors"
+                        className="mt-5 p-1.5 text-ink-muted hover:text-[#8E3B32] dark:hover:text-rose-400 transition-colors"
                         title="Remove item"
                       >
                         <Trash2 className="w-4 h-4" />
@@ -506,10 +506,10 @@ export const InvoiceFormPage: React.FC = () => {
                       required
                     />
                     <div>
-                      <span className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-1 font-sans">
+                      <span className="block text-xs font-bold uppercase tracking-wider text-ink-muted mb-1 font-sans">
                         Line Total
                       </span>
-                      <div className="money h-8 flex items-center px-2.5 rounded border border-slate-200 bg-slate-100 text-slate-800 font-bold text-xs">
+                      <div className="money h-11 flex items-center px-3 rounded border border-line bg-paper text-ink font-bold text-sm">
                         {formatCurrency(item.total, currency, currencySymbol)}
                       </div>
                     </div>
@@ -520,8 +520,8 @@ export const InvoiceFormPage: React.FC = () => {
           </div>
 
           {/* Terms & Notes */}
-          <div className="border border-slate-200/80 rounded-md bg-white p-5 shadow-subtle space-y-4">
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-500 font-sans block border-b border-slate-100 pb-2">
+          <div className="border border-line rounded-md bg-surface p-5 shadow-subtle space-y-4">
+            <span className="text-xs font-bold uppercase tracking-wider text-ink-muted font-sans block border-b border-line pb-2">
               Invoice Notes & Payment Conditions
             </span>
             <Textarea
@@ -544,8 +544,8 @@ export const InvoiceFormPage: React.FC = () => {
         {/* Right Sidebar: Meta & Financials (4 cols) */}
         <div className="lg:col-span-4 space-y-6">
           {/* Metadata Card */}
-          <div className="border border-slate-200/80 rounded-md bg-white p-4 shadow-subtle space-y-3">
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-500 font-sans block border-b border-slate-100 pb-2">
+          <div className="border border-line rounded-md bg-surface p-4 shadow-subtle space-y-3">
+            <span className="text-xs font-bold uppercase tracking-wider text-ink-muted font-sans block border-b border-line pb-2">
               Invoice Settings
             </span>
 
@@ -564,7 +564,7 @@ export const InvoiceFormPage: React.FC = () => {
             >
               <option value="">No linked quotation</option>
               {quotations.map((q) => (
-                <option key={q.id} value={q.quotationNumber}>
+                <option key={q.id} value={q.id}>
                   {q.quotationNumber} — {q.clientSnapshot.name} ({formatCurrency(q.grandTotal, q.currency, q.currencySymbol)})
                 </option>
               ))}
@@ -617,14 +617,14 @@ export const InvoiceFormPage: React.FC = () => {
           </div>
 
           {/* Financial Breakdown Card */}
-          <div className="border border-slate-200/80 rounded-md bg-white p-4 shadow-subtle space-y-4">
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-500 font-sans block border-b border-slate-100 pb-2">
+          <div className="border border-line rounded-md bg-surface p-4 shadow-subtle space-y-4">
+            <span className="text-xs font-bold uppercase tracking-wider text-ink-muted font-sans block border-b border-line pb-2">
               Financial Summary
             </span>
 
             {/* Discount Configuration */}
             <div className="space-y-1.5">
-              <span className="block text-xs font-bold uppercase tracking-wider text-slate-500 font-sans">
+              <span className="block text-xs font-bold uppercase tracking-wider text-ink-muted font-sans">
                 Discount
               </span>
               <div className="grid grid-cols-2 gap-2">
@@ -647,17 +647,17 @@ export const InvoiceFormPage: React.FC = () => {
             </div>
 
             {/* Tax Configuration */}
-            <div className="space-y-2 pt-2 border-t border-slate-100">
+            <div className="space-y-2 pt-2 border-t border-line">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 font-sans">
+                <span className="text-xs font-bold uppercase tracking-wider text-ink-muted font-sans">
                   Tax Calculation
                 </span>
-                <label className="flex items-center gap-1.5 cursor-pointer text-xs text-slate-600">
+                <label className="flex items-center gap-1.5 cursor-pointer text-xs text-ink-secondary">
                   <input
                     type="checkbox"
                     checked={isTaxEnabled}
                     onChange={(e) => setIsTaxEnabled(e.target.checked)}
-                    className="rounded border-slate-300 text-slate-900 focus:ring-0"
+                    className="rounded border-line-strong text-indigo-600 focus:ring-indigo-500"
                   />
                   <span>Apply</span>
                 </label>
@@ -685,35 +685,35 @@ export const InvoiceFormPage: React.FC = () => {
             </div>
 
             {/* Calculation Totals */}
-            <div className="pt-3 border-t border-slate-200 space-y-1.5 text-xs">
-              <div className="flex justify-between text-slate-600">
+            <div className="pt-3 border-t border-line space-y-1.5 text-xs">
+              <div className="flex justify-between text-ink-secondary">
                 <span>Subtotal</span>
-                <span className="money font-medium">
+                <span className="money font-medium text-ink">
                   {formatCurrency(financials.subtotal, currency, currencySymbol)}
                 </span>
               </div>
 
               {financials.discountAmount > 0 && (
-                <div className="flex justify-between text-slate-700">
+                <div className="flex justify-between text-ink-secondary">
                   <span>Discount</span>
-                  <span className="money">
+                  <span className="money text-ink">
                     - {formatCurrency(financials.discountAmount, currency, currencySymbol)}
                   </span>
                 </div>
               )}
 
               {isTaxEnabled && financials.taxAmount > 0 && (
-                <div className="flex justify-between text-slate-600">
+                <div className="flex justify-between text-ink-secondary">
                   <span>
                     {taxName} ({taxRate}%)
                   </span>
-                  <span className="money font-medium">
+                  <span className="money font-medium text-ink">
                     {formatCurrency(financials.taxAmount, currency, currencySymbol)}
                   </span>
                 </div>
               )}
 
-              <div className="pt-2 border-t border-slate-900 flex justify-between items-baseline text-slate-900">
+              <div className="pt-2 border-t border-ink flex justify-between items-baseline text-ink">
                 <span className="font-bold text-xs uppercase tracking-wider">Grand Total</span>
                 <span className="money font-extrabold text-base">
                   {formatCurrency(financials.grandTotal, currency, currencySymbol)}
@@ -721,15 +721,15 @@ export const InvoiceFormPage: React.FC = () => {
               </div>
 
               {currentPayments.length > 0 && (
-                <div className="flex justify-between text-slate-600 font-medium pt-1">
+                <div className="flex justify-between text-ink-secondary font-medium pt-1">
                   <span>Less: Payments</span>
-                  <span className="money">
+                  <span className="money text-ink">
                     - {formatCurrency(amountPaid, currency, currencySymbol)}
                   </span>
                 </div>
               )}
 
-              <div className="pt-2 border-t border-slate-300 flex justify-between items-baseline font-bold text-slate-900">
+              <div className="pt-2 border-t border-line-strong flex justify-between items-baseline font-bold text-ink">
                 <span className="text-[11px] uppercase tracking-wider">Balance Due</span>
                 <span className="money text-base font-extrabold">
                   {formatCurrency(outstandingBalance, currency, currencySymbol)}

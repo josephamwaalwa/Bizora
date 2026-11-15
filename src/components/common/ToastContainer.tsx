@@ -11,16 +11,16 @@ export const ToastContainer: React.FC = () => {
     <div className="fixed bottom-6 right-6 z-50 flex w-full max-w-sm flex-col gap-3 pointer-events-none toast-container">
       {toasts.map((toast) => {
         const bar = {
-          success: 'bg-teal-700',
-          error: 'bg-[#8E3B32]',
-          warning: 'bg-[#8A5A12]',
-          info: 'bg-ink',
+          success: 'bg-teal-700 dark:bg-teal-500',
+          error: 'bg-[#8E3B32] dark:bg-rose-500',
+          warning: 'bg-[#8A5A12] dark:bg-amber-500',
+          info: 'bg-ink dark:bg-indigo-500',
         }[toast.type];
 
         return (
           <div
             key={toast.id}
-            className="pointer-events-auto flex items-start gap-4 border border-line bg-white shadow-modal"
+            className="pointer-events-auto flex items-start gap-4 border border-line bg-surface shadow-modal"
           >
             <span className={`mt-0 w-1 self-stretch ${bar}`} />
             <div className="flex-1 min-w-0 py-4 pr-2">
