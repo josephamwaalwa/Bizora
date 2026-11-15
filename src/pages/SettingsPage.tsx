@@ -7,6 +7,7 @@ import { Select } from '../components/common/Select';
 import { Textarea } from '../components/common/Textarea';
 import type { BusinessProfile, CurrencyCode } from '../types';
 import { StorageService } from '../services/storage';
+import { exportJsonBackupFile, pickAndReadJsonBackupInTauri } from '../services/fileOperations';
 import { getLogoOptions } from '../utils/logo';
 import { BusinessAvatar } from '../components/common/BusinessAvatar';
 import {
@@ -87,49 +88,80 @@ export const SettingsPage: React.FC = () => {
     updateBusinessProfile(profile);
   };
 
-  // Export JSON Backup
-  const handleExportBackup = () => {
-    const jsonStr = StorageService.exportBackupJson();
-    const blob = new Blob([jsonStr], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `bizora-backup-${new Date().toISOString().split('T')[0]}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-    addToast({
-      type: 'success',
-      title: 'Backup Exported',
-      message: 'Downloaded complete business backup file.',
-    });
+  const applyImportedBackupContent = (content: string) => {
+    const success = StorageService.importBackupJson(content);
+    if (success) {
+      refreshData();
+      setProfile(StorageService.getBusinessProfile());
+      setLogoPreview(StorageService.getBusinessProfile().logoUrl || '');
+      addToast({
+        type: 'success',
+        title: 'Backup Restored',
+        message: 'All clients, documents, and settings have been imported.',
+      });
+    } else {
+      addToast({
+        type: 'error',
+        title: 'Invalid File',
+        message: 'The selected file is not a valid Bizora backup JSON.',
+      });
+    }
   };
 
-  // Import JSON Backup
+  // Export JSON Backup
+  const handleExportBackup = async () => {
+    try {
+      const jsonStr = StorageService.exportBackupJson();
+      const fileName = `bizora-backup-${new Date().toISOString().split('T')[0]}.json`;
+      const result = await exportJsonBackupFile(fileName, jsonStr);
+      if (result === 'cancelled') return;
+
+      addToast({
+        type: 'success',
+        title: 'Backup Exported',
+        message: 'Saved complete business backup file.',
+      });
+    } catch (error) {
+      console.error('Failed to export backup:', error);
+      addToast({
+        type: 'error',
+        title: 'Export Failed',
+        message: 'Could not save the backup file.',
+      });
+    }
+  };
+
+  // Trigger Import JSON Backup (native dialog in Tauri, file input in browser)
+  const handleTriggerImport = async () => {
+    try {
+      const tauriResult = await pickAndReadJsonBackupInTauri();
+      if (tauriResult === null) {
+        importFileRef.current?.click();
+        return;
+      }
+      if (tauriResult.status === 'cancelled') return;
+      applyImportedBackupContent(tauriResult.content);
+    } catch (error) {
+      console.error('Failed to import backup:', error);
+      addToast({
+        type: 'error',
+        title: 'Import Failed',
+        message: 'Could not read the selected backup file.',
+      });
+    }
+  };
+
+  // Browser <input type="file"> Import Handler
   const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       const reader = new FileReader();
       reader.onload = (event) => {
         const content = event.target?.result as string;
-        const success = StorageService.importBackupJson(content);
-        if (success) {
-          refreshData();
-          setProfile(StorageService.getBusinessProfile());
-          setLogoPreview(StorageService.getBusinessProfile().logoUrl || '');
-          addToast({
-            type: 'success',
-            title: 'Backup Restored',
-            message: 'All clients, documents, and settings have been imported.',
-          });
-        } else {
-          addToast({
-            type: 'error',
-            title: 'Invalid File',
-            message: 'The selected file is not a valid Bizora backup JSON.',
-          });
-        }
+        applyImportedBackupContent(content);
       };
       reader.readAsText(file);
+      e.target.value = '';
     }
   };
 
@@ -639,7 +671,7 @@ export const SettingsPage: React.FC = () => {
                 type="button"
                 variant="secondary"
                 size="sm"
-                onClick={() => importFileRef.current?.click()}
+                onClick={handleTriggerImport}
                 leftIcon={<Upload className="w-3.5 h-3.5" />}
               >
                 Restore from Backup
