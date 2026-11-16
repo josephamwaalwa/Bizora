@@ -1,28 +1,39 @@
 mod db;
 
+use db::dto::CommandError;
 use db::{DatabaseManager, DatabaseStatus};
 use tauri::Manager;
 
 #[tauri::command]
 async fn initialize_database(
     db_manager: tauri::State<'_, DatabaseManager>,
-) -> Result<DatabaseStatus, String> {
+) -> Result<DatabaseStatus, CommandError> {
     let manager = db_manager.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || manager.initialize())
+    let result = tauri::async_runtime::spawn_blocking(move || manager.initialize())
         .await
-        .map_err(|err| format!("Database initialization task failed: {err}"))?
-        .map_err(|err| err.to_string())
+        .map_err(|_| CommandError {
+            code: "INTERNAL_ERROR".to_string(),
+            message: "Database initialization task failed unexpectedly".to_string(),
+            field: None,
+        })?;
+
+    result.map_err(|err| CommandError::from(&err))
 }
 
 #[tauri::command]
 async fn get_database_status(
     db_manager: tauri::State<'_, DatabaseManager>,
-) -> Result<DatabaseStatus, String> {
+) -> Result<DatabaseStatus, CommandError> {
     let manager = db_manager.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || manager.health_check())
+    let result = tauri::async_runtime::spawn_blocking(move || manager.health_check())
         .await
-        .map_err(|err| format!("Database status task failed: {err}"))?
-        .map_err(|err| err.to_string())
+        .map_err(|_| CommandError {
+            code: "INTERNAL_ERROR".to_string(),
+            message: "Database status check task failed unexpectedly".to_string(),
+            field: None,
+        })?;
+
+    result.map_err(|err| CommandError::from(&err))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -33,9 +44,9 @@ pub fn run() {
         .setup(|app| {
             let db_manager = match app.path().app_data_dir() {
                 Ok(app_data_dir) => DatabaseManager::with_app_data_dir(&app_data_dir),
-                Err(err) => DatabaseManager::with_resolution_error(format!(
-                    "Failed to resolve Tauri application data directory: {err}"
-                )),
+                Err(_) => DatabaseManager::with_resolution_error(
+                    "Failed to resolve application data directory".to_string(),
+                ),
             };
 
             app.manage(db_manager.clone());
@@ -44,7 +55,7 @@ pub fn run() {
             let startup_manager = db_manager;
             tauri::async_runtime::spawn_blocking(move || {
                 if let Err(err) = startup_manager.initialize() {
-                    startup_manager.complete_startup(Err(err.to_string()));
+                    startup_manager.complete_startup(Err(CommandError::from(&err).message));
                     eprintln!("[Bizora DB] Startup SQLite initialization failed: {err}");
                 }
             });
@@ -53,7 +64,47 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             initialize_database,
-            get_database_status
+            get_database_status,
+            db::commands::create_local_profile,
+            db::commands::get_local_profile_by_id,
+            db::commands::get_local_profiles,
+            db::commands::update_local_profile,
+            db::commands::create_business,
+            db::commands::get_business_by_id,
+            db::commands::get_businesses,
+            db::commands::update_business,
+            db::commands::delete_business,
+            db::commands::create_client,
+            db::commands::get_client_by_id,
+            db::commands::get_clients_by_business,
+            db::commands::update_client,
+            db::commands::delete_client,
+            db::commands::create_quotation,
+            db::commands::get_quotation_by_id,
+            db::commands::get_quotations_by_business,
+            db::commands::get_quotation_items,
+            db::commands::update_quotation,
+            db::commands::delete_quotation,
+            db::commands::create_invoice,
+            db::commands::get_invoice_by_id,
+            db::commands::get_invoices_by_business,
+            db::commands::get_invoice_items,
+            db::commands::update_invoice,
+            db::commands::delete_invoice,
+            db::commands::create_payment,
+            db::commands::get_payments_by_invoice,
+            db::commands::get_payments_by_business,
+            db::commands::delete_payment,
+            db::commands::create_activity_log,
+            db::commands::get_activity_log_by_id,
+            db::commands::get_activity_logs_by_business,
+            db::commands::create_business_asset,
+            db::commands::get_business_asset_by_id,
+            db::commands::get_business_assets_by_business,
+            db::commands::delete_business_asset,
+            db::commands::get_app_setting,
+            db::commands::save_app_setting,
+            db::commands::delete_app_setting
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
