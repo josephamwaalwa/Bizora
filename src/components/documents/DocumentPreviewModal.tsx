@@ -51,13 +51,14 @@ export const DocumentPreviewModal: React.FC = () => {
     ? invoice?.invoiceNumber || ''
     : quote?.quotationNumber || '';
 
-  // Resolve linked quotation number (handles both IDs like 'quo_1' and human numbers like 'QUO-0001')
+  // Resolve linked quotation number (handles both IDs like UUID/'quo_1' and legacy human numbers like 'QUO-0001')
   const resolvedQuoteRef = (() => {
     if (!isInvoice || !invoice?.quotationId) return undefined;
     const rawRef = invoice.quotationId.trim();
     if (!rawRef) return undefined;
+    const normalizedRef = rawRef.toLowerCase();
     const matchedQuote = quotations.find(
-      (q) => q.id === rawRef || q.quotationNumber === rawRef
+      (q) => q.id === rawRef || q.quotationNumber.trim().toLowerCase() === normalizedRef
     );
     return matchedQuote ? matchedQuote.quotationNumber : rawRef;
   })();

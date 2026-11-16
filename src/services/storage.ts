@@ -1,4 +1,4 @@
-import type { BusinessProfile, Client, Quotation, Invoice, ActivityLog, PaymentRecord } from '../types';
+import type { BusinessProfile, Client, Quotation, Invoice, ActivityLog, PaymentRecord, QuotationStatus } from '../types';
 import {
   initialBusinessProfile,
   initialClients,
@@ -7,7 +7,7 @@ import {
   initialActivities,
 } from './seedData';
 import { calculateInvoiceBalances, determineUpdatedInvoiceStatus } from '../utils/calculations';
-import { generateId } from '../utils/idGenerator';
+import { formatDocNumber, generateId } from '../utils/idGenerator';
 
 const KEYS = {
   PROFILE: 'bizora_business_profile_v1',
@@ -236,26 +236,231 @@ function safeSet<T>(key: string, value: T): boolean {
   return false;
 }
 
+function normalizeDocNumber(value: string | undefined): string {
+  return (value || '').trim().toLowerCase();
+}
+
+function resolveQuotationFromList(rawRef: string | undefined, quotes: Quotation[]): Quotation | undefined {
+  const trimmed = rawRef?.trim();
+  if (!trimmed) return undefined;
+
+  const byId = quotes.find((q) => q.id === trimmed);
+  if (byId) return byId;
+
+  const normalizedRef = normalizeDocNumber(trimmed);
+  return quotes.find((q) => normalizeDocNumber(q.quotationNumber) === normalizedRef);
+}
+
+function resolveInvoiceFromList(rawRef: string | undefined, invoices: Invoice[]): Invoice | undefined {
+  const trimmed = rawRef?.trim();
+  if (!trimmed) return undefined;
+
+  const byId = invoices.find((inv) => inv.id === trimmed);
+  if (byId) return byId;
+
+  const normalizedRef = normalizeDocNumber(trimmed);
+  return invoices.find((inv) => normalizeDocNumber(inv.invoiceNumber) === normalizedRef);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isDateBeforeToday(dateString: string | undefined): boolean {
+  if (!dateString) return false;
+  const now = new Date();
+  const todayLocal = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateString.trim())) {
+    return dateString.trim() < todayLocal;
+  }
+  const parsed = new Date(dateString);
+  if (isNaN(parsed.getTime())) return false;
+  const midnightToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return parsed < midnightToday;
+}
+
+function restoreUnlinkedQuotationStatus(
+  status: QuotationStatus,
+  expiryDate?: string,
+  preConversionStatus?: QuotationStatus
+): QuotationStatus {
+  if (status === 'declined') return 'declined';
+  if (status !== 'accepted') return status;
+
+  if (preConversionStatus) {
+    if (preConversionStatus === 'declined') return 'declined';
+    if (preConversionStatus === 'draft') return 'draft';
+    if (preConversionStatus === 'accepted') return 'accepted';
+    return isDateBeforeToday(expiryDate) ? 'expired' : 'sent';
+  }
+
+  return isDateBeforeToday(expiryDate) ? 'expired' : 'sent';
+}
+
+function parseSequentialDocNumber(docNumber: string, prefix: string): number | null {
+  const trimmed = docNumber.trim();
+  const normalizedPrefix = prefix.trim();
+  if (normalizedPrefix) {
+    if (!trimmed.toLowerCase().startsWith(normalizedPrefix.toLowerCase())) {
+      return null;
+    }
+  }
+  const suffix = normalizedPrefix ? trimmed.slice(normalizedPrefix.length) : trimmed;
+  if (!/^\d+$/.test(suffix)) return null;
+  const num = parseInt(suffix, 10);
+  return Number.isFinite(num) && num >= 1 ? num : null;
+}
+
 export const StorageService = {
   lastWritePersisted: true,
+  lastImportError: null as string | null,
 
   /**
-   * Initializes local storage with rich sample data on first run
+   * Initializes local storage with rich sample data on first run,
+   * or safely normalizes legacy relationship fields on existing records.
    */
   init(): void {
     const hasInitialized = readRaw(KEYS.INITIALIZED);
     if (!hasInitialized) {
       this.resetToDemoData();
+      return;
     }
+    this.normalizeLegacyRelationships();
+  },
+
+  /**
+   * Resolves legacy quotationNumber references inside Invoice.quotationId
+   * and legacy invoiceNumber references inside Quotation.convertedInvoiceId
+   * without mutating record primary IDs or unrelated snapshots.
+   */
+  normalizeLegacyRelationships(): void {
+    const rawQuotes = safeGet<Quotation[]>(KEYS.QUOTATIONS, []);
+    const rawInvoices = safeGet<Invoice[]>(KEYS.INVOICES, []);
+    if (rawQuotes.length === 0 && rawInvoices.length === 0) {
+      this.lastWritePersisted = true;
+      return;
+    }
+
+    let quotesChanged = false;
+    let invoicesChanged = false;
+    const now = new Date().toISOString();
+
+    const updatedQuotes = rawQuotes.map((q) => ({ ...q }));
+    const updatedInvoices = rawInvoices.map((inv) => ({ ...inv }));
+
+    // Pass 1: Normalize Invoice.quotationId -> Quotation.id and record first live claim per quote
+    const claimedQuoteToInvoice = new Map<string, string>();
+    for (let i = 0; i < updatedInvoices.length; i++) {
+      const inv = updatedInvoices[i];
+      if (!inv.quotationId || !inv.quotationId.trim()) continue;
+
+      const matchedQuote = resolveQuotationFromList(inv.quotationId, updatedQuotes);
+      if (!matchedQuote) continue;
+
+      if (inv.quotationId !== matchedQuote.id) {
+        updatedInvoices[i] = {
+          ...inv,
+          quotationId: matchedQuote.id,
+        };
+        invoicesChanged = true;
+      }
+
+      if (!claimedQuoteToInvoice.has(matchedQuote.id)) {
+        claimedQuoteToInvoice.set(matchedQuote.id, inv.id);
+      }
+    }
+
+    // Pass 2: Normalize Quotation.convertedInvoiceId -> Invoice.id, clear dangling refs, and keep status safe
+    for (let i = 0; i < updatedQuotes.length; i++) {
+      const q = updatedQuotes[i];
+      const claimedInvId = claimedQuoteToInvoice.get(q.id);
+      const rawConvertedRef = q.convertedInvoiceId?.trim();
+
+      if (rawConvertedRef) {
+        const matchedInv = resolveInvoiceFromList(rawConvertedRef, updatedInvoices);
+        const matchedInvQuote = matchedInv?.quotationId
+          ? resolveQuotationFromList(matchedInv.quotationId, updatedQuotes)
+          : undefined;
+        const pointsToDifferentQuote = Boolean(matchedInvQuote && matchedInvQuote.id !== q.id);
+
+        if (matchedInv && !pointsToDifferentQuote) {
+          let quoteModified = false;
+          if (q.convertedInvoiceId !== matchedInv.id) {
+            q.convertedInvoiceId = matchedInv.id;
+            quoteModified = true;
+          }
+          if (q.status !== 'declined' && q.status !== 'accepted') {
+            q.preConversionStatus = q.preConversionStatus ?? q.status;
+            q.status = 'accepted';
+            quoteModified = true;
+          }
+          if (quoteModified) {
+            q.updatedAt = now;
+            quotesChanged = true;
+          }
+          continue;
+        }
+
+        // Converted reference points to an invoice that no longer exists (or belongs to another quote)
+        if (claimedInvId) {
+          q.convertedInvoiceId = claimedInvId;
+          if (q.status !== 'declined' && q.status !== 'accepted') {
+            q.preConversionStatus = q.preConversionStatus ?? q.status;
+            q.status = 'accepted';
+          }
+          q.updatedAt = now;
+          quotesChanged = true;
+        } else {
+          const restoredStatus = restoreUnlinkedQuotationStatus(q.status, q.expiryDate, q.preConversionStatus);
+          q.convertedInvoiceId = undefined;
+          q.preConversionStatus = undefined;
+          q.status = restoredStatus;
+          q.updatedAt = now;
+          quotesChanged = true;
+        }
+        continue;
+      }
+
+      // Quotation has no convertedInvoiceId, check if an invoice references it
+      if (claimedInvId) {
+        q.convertedInvoiceId = claimedInvId;
+        if (q.status !== 'declined' && q.status !== 'accepted') {
+          q.preConversionStatus = q.preConversionStatus ?? q.status;
+          q.status = 'accepted';
+        }
+        q.updatedAt = now;
+        quotesChanged = true;
+      } else if (q.preConversionStatus !== undefined) {
+        q.preConversionStatus = undefined;
+        q.updatedAt = now;
+        quotesChanged = true;
+      }
+    }
+
+    let persisted = true;
+    if (invoicesChanged) {
+      persisted = safeSet(KEYS.INVOICES, updatedInvoices) && persisted;
+    }
+    if (quotesChanged) {
+      persisted = safeSet(KEYS.QUOTATIONS, updatedQuotes) && persisted;
+    }
+    this.lastWritePersisted = persisted;
   },
 
   resetToDemoData(): void {
-    safeSet(KEYS.PROFILE, initialBusinessProfile);
-    safeSet(KEYS.CLIENTS, initialClients);
-    safeSet(KEYS.QUOTATIONS, initialQuotations);
-    safeSet(KEYS.INVOICES, initialInvoices);
-    safeSet(KEYS.ACTIVITIES, initialActivities);
-    writeRaw(KEYS.INITIALIZED, 'true');
+    memoryStorage.delete(KEYS.LOGO_CACHE);
+    try {
+      localStorage.removeItem(KEYS.LOGO_CACHE);
+    } catch {
+      // ignore
+    }
+    const p1 = safeSet(KEYS.PROFILE, initialBusinessProfile);
+    const p2 = safeSet(KEYS.CLIENTS, initialClients);
+    const p3 = safeSet(KEYS.QUOTATIONS, initialQuotations);
+    const p4 = safeSet(KEYS.INVOICES, initialInvoices);
+    const p5 = safeSet(KEYS.ACTIVITIES, initialActivities);
+    const p6 = writeRaw(KEYS.INITIALIZED, 'true');
+    this.lastWritePersisted = p1 && p2 && p3 && p4 && p5 && p6;
   },
 
   clearAllData(): void {
@@ -286,17 +491,17 @@ export const StorageService = {
       },
       updatedAt: new Date().toISOString(),
     };
-    safeSet(KEYS.PROFILE, emptyProfile);
-    safeSet(KEYS.CLIENTS, []);
-    safeSet(KEYS.QUOTATIONS, []);
-    safeSet(KEYS.INVOICES, []);
     memoryStorage.delete(KEYS.LOGO_CACHE);
     try {
       localStorage.removeItem(KEYS.LOGO_CACHE);
     } catch {
       // ignore
     }
-    safeSet(KEYS.ACTIVITIES, [
+    const p1 = safeSet(KEYS.PROFILE, emptyProfile);
+    const p2 = safeSet(KEYS.CLIENTS, []);
+    const p3 = safeSet(KEYS.QUOTATIONS, []);
+    const p4 = safeSet(KEYS.INVOICES, []);
+    const p5 = safeSet(KEYS.ACTIVITIES, [
       {
         id: generateId('act'),
         type: 'settings_updated',
@@ -305,6 +510,8 @@ export const StorageService = {
         timestamp: new Date().toISOString(),
       },
     ]);
+    const p6 = writeRaw(KEYS.INITIALIZED, 'true');
+    this.lastWritePersisted = p1 && p2 && p3 && p4 && p5 && p6;
   },
 
   // Business Profile
@@ -315,6 +522,7 @@ export const StorageService = {
   saveBusinessProfile(profile: BusinessProfile): BusinessProfile {
     const previousProfile = this.getBusinessProfile();
     const updated = { ...profile, updatedAt: new Date().toISOString() };
+    let persisted = true;
 
     // Preserve historical snapshots that referenced the previous profile logo
     if (
@@ -324,7 +532,7 @@ export const StorageService = {
     ) {
       const cache = getLogoCache();
       const historicalRef = cacheLogo(previousProfile.logoUrl, cache);
-      saveLogoCache(cache);
+      persisted = saveLogoCache(cache) && persisted;
 
       const rawQuotes = safeGet<Quotation[]>(KEYS.QUOTATIONS, []);
       let quotesChanged = false;
@@ -338,7 +546,9 @@ export const StorageService = {
         }
         return q;
       });
-      if (quotesChanged) safeSet(KEYS.QUOTATIONS, updatedQuotes);
+      if (quotesChanged) {
+        persisted = safeSet(KEYS.QUOTATIONS, updatedQuotes) && persisted;
+      }
 
       const rawInvoices = safeGet<Invoice[]>(KEYS.INVOICES, []);
       let invoicesChanged = false;
@@ -352,32 +562,85 @@ export const StorageService = {
         }
         return inv;
       });
-      if (invoicesChanged) safeSet(KEYS.INVOICES, updatedInvoices);
+      if (invoicesChanged) {
+        persisted = safeSet(KEYS.INVOICES, updatedInvoices) && persisted;
+      }
     }
 
-    this.lastWritePersisted = safeSet(KEYS.PROFILE, updated);
+    persisted = safeSet(KEYS.PROFILE, updated) && persisted;
     this.addActivity({
       type: 'settings_updated',
       title: 'Business Profile Updated',
       description: `Settings updated for ${profile.name}`,
     });
+    this.lastWritePersisted = persisted;
     return updated;
   },
 
-  incrementQuoteNumber(): number {
-    const profile = this.getBusinessProfile();
-    const current = profile.nextQuoteNumber || 1;
-    profile.nextQuoteNumber = current + 1;
-    safeSet(KEYS.PROFILE, profile);
-    return current;
+  isQuotationNumberTaken(quotationNumber: string, excludeId?: string, existingQuotes?: Quotation[]): boolean {
+    const target = normalizeDocNumber(quotationNumber);
+    if (!target) return false;
+    const quotes = existingQuotes || safeGet<Quotation[]>(KEYS.QUOTATIONS, []);
+    return quotes.some((q) => q.id !== excludeId && normalizeDocNumber(q.quotationNumber) === target);
   },
 
-  incrementInvoiceNumber(): number {
+  isInvoiceNumberTaken(invoiceNumber: string, excludeId?: string, existingInvoices?: Invoice[]): boolean {
+    const target = normalizeDocNumber(invoiceNumber);
+    if (!target) return false;
+    const invoices = existingInvoices || safeGet<Invoice[]>(KEYS.INVOICES, []);
+    return invoices.some((inv) => inv.id !== excludeId && normalizeDocNumber(inv.invoiceNumber) === target);
+  },
+
+  getNextAvailableQuoteNumber(): number {
     const profile = this.getBusinessProfile();
-    const current = profile.nextInvoiceNumber || 1;
-    profile.nextInvoiceNumber = current + 1;
-    safeSet(KEYS.PROFILE, profile);
-    return current;
+    const quotes = safeGet<Quotation[]>(KEYS.QUOTATIONS, []);
+    const prefix = profile.quotePrefix || 'QUO-';
+    let candidate = Math.max(1, Number(profile.nextQuoteNumber) || 1);
+
+    while (this.isQuotationNumberTaken(formatDocNumber(prefix, candidate), undefined, quotes)) {
+      candidate += 1;
+    }
+    return candidate;
+  },
+
+  getNextAvailableInvoiceNumber(): number {
+    const profile = this.getBusinessProfile();
+    const invoices = safeGet<Invoice[]>(KEYS.INVOICES, []);
+    const prefix = profile.invoicePrefix || 'INV-';
+    let candidate = Math.max(1, Number(profile.nextInvoiceNumber) || 1);
+
+    while (this.isInvoiceNumberTaken(formatDocNumber(prefix, candidate), undefined, invoices)) {
+      candidate += 1;
+    }
+    return candidate;
+  },
+
+  commitUsedQuoteNumber(savedQuoteNumber: string): boolean {
+    const profile = this.getBusinessProfile();
+    const prefix = profile.quotePrefix || 'QUO-';
+    const currentNext = Math.max(1, Number(profile.nextQuoteNumber) || 1);
+    const parsed = parseSequentialDocNumber(savedQuoteNumber, prefix);
+    if (parsed !== null && parsed >= currentNext) {
+      profile.nextQuoteNumber = parsed + 1;
+      const persisted = safeSet(KEYS.PROFILE, profile);
+      this.lastWritePersisted = persisted;
+      return persisted;
+    }
+    return true;
+  },
+
+  commitUsedInvoiceNumber(savedInvoiceNumber: string): boolean {
+    const profile = this.getBusinessProfile();
+    const prefix = profile.invoicePrefix || 'INV-';
+    const currentNext = Math.max(1, Number(profile.nextInvoiceNumber) || 1);
+    const parsed = parseSequentialDocNumber(savedInvoiceNumber, prefix);
+    if (parsed !== null && parsed >= currentNext) {
+      profile.nextInvoiceNumber = parsed + 1;
+      const persisted = safeSet(KEYS.PROFILE, profile);
+      this.lastWritePersisted = persisted;
+      return persisted;
+    }
+    return true;
   },
 
   // Clients
@@ -393,6 +656,7 @@ export const StorageService = {
     const clients = this.getClients();
     const now = new Date().toISOString();
     let saved: Client;
+    let isNew = false;
 
     if (client.id) {
       const idx = clients.findIndex((c) => c.id === client.id);
@@ -400,6 +664,7 @@ export const StorageService = {
         saved = { ...clients[idx], ...client, updatedAt: now } as Client;
         clients[idx] = saved;
       } else {
+        isNew = true;
         saved = {
           ...client,
           id: client.id,
@@ -411,6 +676,7 @@ export const StorageService = {
         clients.unshift(saved);
       }
     } else {
+      isNew = true;
       saved = {
         ...client,
         id: generateId('cli'),
@@ -420,6 +686,10 @@ export const StorageService = {
         updatedAt: now,
       } as Client;
       clients.unshift(saved);
+    }
+
+    const persisted = safeSet(KEYS.CLIENTS, clients);
+    if (isNew && !client.id) {
       this.addActivity({
         type: 'client_created',
         title: `Client Added: ${saved.name}`,
@@ -427,8 +697,7 @@ export const StorageService = {
         referenceId: saved.id,
       });
     }
-
-    this.lastWritePersisted = safeSet(KEYS.CLIENTS, clients);
+    this.lastWritePersisted = persisted;
     return saved;
   },
 
@@ -436,7 +705,7 @@ export const StorageService = {
     const clients = this.getClients();
     const filtered = clients.filter((c) => c.id !== id);
     if (filtered.length !== clients.length) {
-      safeSet(KEYS.CLIENTS, filtered);
+      this.lastWritePersisted = safeSet(KEYS.CLIENTS, filtered);
       return true;
     }
     return false;
@@ -455,50 +724,107 @@ export const StorageService = {
   },
 
   saveQuotation(quote: Quotation): Quotation {
+    const trimmedNumber = (quote.quotationNumber || '').trim();
+    if (!trimmedNumber) {
+      throw new Error('Quotation number is required.');
+    }
+
     const profileLogoUrl = this.getBusinessProfile().logoUrl || '';
     const cache = getLogoCache();
     const rawQuotes = safeGet<Quotation[]>(KEYS.QUOTATIONS, []);
+
+    if (this.isQuotationNumberTaken(trimmedNumber, quote.id, rawQuotes)) {
+      throw new Error(`Quotation number "${trimmedNumber}" already exists.`);
+    }
+
     const idx = rawQuotes.findIndex((q) => q.id === quote.id);
     const now = new Date().toISOString();
-    const itemToSave: Quotation = { ...quote, updatedAt: now };
+    const itemToSave: Quotation = {
+      ...quote,
+      quotationNumber: trimmedNumber,
+      preConversionStatus: quote.convertedInvoiceId ? quote.preConversionStatus : undefined,
+      updatedAt: now,
+    };
     const storableItem = dehydrateSnapshotLogo(itemToSave, profileLogoUrl, cache);
 
+    let persisted = true;
     if (Object.keys(cache).length > 0) {
-      saveLogoCache(cache);
+      persisted = saveLogoCache(cache) && persisted;
     }
 
     if (idx !== -1) {
       rawQuotes[idx] = storableItem;
     } else {
       rawQuotes.unshift(storableItem);
+    }
+
+    persisted = safeSet(KEYS.QUOTATIONS, rawQuotes) && persisted;
+
+    if (idx === -1) {
       this.addActivity({
         type: 'quote_created',
-        title: `Quotation ${quote.quotationNumber} Created`,
+        title: `Quotation ${trimmedNumber} Created`,
         description: `For ${quote.clientSnapshot.name || 'Client'} (${quote.currencySymbol} ${quote.grandTotal.toLocaleString()})`,
         referenceId: quote.id,
       });
     }
 
-    this.lastWritePersisted = safeSet(KEYS.QUOTATIONS, rawQuotes);
+    this.lastWritePersisted = persisted;
     return itemToSave;
   },
 
   deleteQuotation(id: string): boolean {
     const quotes = safeGet<Quotation[]>(KEYS.QUOTATIONS, []);
+    const targetQuote = quotes.find((q) => q.id === id);
+    if (!targetQuote) return false;
+
     const filtered = quotes.filter((q) => q.id !== id);
-    if (filtered.length !== quotes.length) {
-      safeSet(KEYS.QUOTATIONS, filtered);
-      return true;
+    let persisted = safeSet(KEYS.QUOTATIONS, filtered);
+
+    // Clear quotationId from any linked invoices while preserving the invoice and its snapshots
+    const rawInvoices = safeGet<Invoice[]>(KEYS.INVOICES, []);
+    const targetDocNum = normalizeDocNumber(targetQuote.quotationNumber);
+    const now = new Date().toISOString();
+    let invoicesChanged = false;
+
+    const updatedInvoices = rawInvoices.map((inv) => {
+      const ref = inv.quotationId?.trim();
+      if (!ref) return inv;
+      if (ref === id || (targetDocNum && normalizeDocNumber(ref) === targetDocNum)) {
+        invoicesChanged = true;
+        return {
+          ...inv,
+          quotationId: undefined,
+          updatedAt: now,
+        };
+      }
+      return inv;
+    });
+
+    if (invoicesChanged) {
+      persisted = safeSet(KEYS.INVOICES, updatedInvoices) && persisted;
     }
-    return false;
+
+    this.lastWritePersisted = persisted;
+    return true;
   },
 
   // Invoices
   getInvoices(): Invoice[] {
     const profile = this.getBusinessProfile();
     const cache = getLogoCache();
+    const rawQuotes = safeGet<Quotation[]>(KEYS.QUOTATIONS, []);
     const rawInvoices = safeGet<Invoice[]>(KEYS.INVOICES, []);
-    return rawInvoices.map((inv) => hydrateDocument(inv, profile, cache));
+    return rawInvoices.map((inv) => {
+      const hydrated = hydrateDocument(inv, profile, cache);
+      if (hydrated.quotationId) {
+        const resolvedQuote = resolveQuotationFromList(hydrated.quotationId, rawQuotes);
+        if (resolvedQuote && resolvedQuote.id !== hydrated.quotationId) {
+          return { ...hydrated, quotationId: resolvedQuote.id };
+        }
+      }
+      return hydrated;
+    });
   },
 
   getInvoiceById(id: string): Invoice | undefined {
@@ -506,10 +832,68 @@ export const StorageService = {
   },
 
   saveInvoice(invoice: Invoice): Invoice {
+    const trimmedNumber = (invoice.invoiceNumber || '').trim();
+    if (!trimmedNumber) {
+      throw new Error('Invoice number is required.');
+    }
+
     const profileLogoUrl = this.getBusinessProfile().logoUrl || '';
     const cache = getLogoCache();
     const rawInvoices = safeGet<Invoice[]>(KEYS.INVOICES, []);
+    const rawQuotes = safeGet<Quotation[]>(KEYS.QUOTATIONS, []);
+    const clients = this.getClients();
+
+    if (this.isInvoiceNumberTaken(trimmedNumber, invoice.id, rawInvoices)) {
+      throw new Error(`Invoice number "${trimmedNumber}" already exists.`);
+    }
+
     const idx = rawInvoices.findIndex((i) => i.id === invoice.id);
+    const existingRaw = idx !== -1 ? rawInvoices[idx] : undefined;
+
+    // Enforce client existence when creating a new invoice or changing the assigned client
+    if (idx === -1 || existingRaw?.clientId !== invoice.clientId) {
+      const clientExists = clients.some((c) => c.id === invoice.clientId);
+      if (!clientExists) {
+        throw new Error('Cannot save invoice: the selected client record does not exist.');
+      }
+    }
+
+    // Resolve and validate quotation link (must store Quotation.id, never quotationNumber)
+    let resolvedQuotationId: string | undefined;
+    if (invoice.quotationId && invoice.quotationId.trim()) {
+      const matchedQuote = resolveQuotationFromList(invoice.quotationId, rawQuotes);
+      if (!matchedQuote) {
+        throw new Error('Cannot save invoice: the selected quotation record no longer exists.');
+      }
+
+      const existingLinkedQuote = existingRaw?.quotationId
+        ? resolveQuotationFromList(existingRaw.quotationId, rawQuotes)
+        : undefined;
+      const wasAlreadyLinkedToThisInvoice =
+        existingLinkedQuote?.id === matchedQuote.id || matchedQuote.convertedInvoiceId === invoice.id;
+
+      if (!wasAlreadyLinkedToThisInvoice && matchedQuote.status === 'declined') {
+        throw new Error(`Quotation ${matchedQuote.quotationNumber} is declined and cannot be linked to an invoice.`);
+      }
+
+      const conflictingInvoice = rawInvoices.find((other) => {
+        if (other.id === invoice.id) return false;
+        const otherResolved = resolveQuotationFromList(other.quotationId, rawQuotes);
+        return otherResolved?.id === matchedQuote.id;
+      });
+
+      const existingConvertedTarget =
+        matchedQuote.convertedInvoiceId &&
+        matchedQuote.convertedInvoiceId !== invoice.id &&
+        rawInvoices.some((other) => other.id === matchedQuote.convertedInvoiceId && other.id !== invoice.id);
+
+      if (conflictingInvoice || existingConvertedTarget) {
+        throw new Error(`Quotation ${matchedQuote.quotationNumber} is already linked to another invoice.`);
+      }
+
+      resolvedQuotationId = matchedQuote.id;
+    }
+
     const now = new Date().toISOString();
 
     // Recalculate balances and auto status
@@ -518,6 +902,8 @@ export const StorageService = {
 
     const itemToSave: Invoice = {
       ...invoice,
+      invoiceNumber: trimmedNumber,
+      quotationId: resolvedQuotationId,
       amountPaid,
       outstandingBalance,
       status: updatedStatus,
@@ -525,34 +911,167 @@ export const StorageService = {
     };
     const storableItem = dehydrateSnapshotLogo(itemToSave, profileLogoUrl, cache);
 
+    let persisted = true;
     if (Object.keys(cache).length > 0) {
-      saveLogoCache(cache);
+      persisted = saveLogoCache(cache) && persisted;
     }
 
     if (idx !== -1) {
       rawInvoices[idx] = storableItem;
     } else {
       rawInvoices.unshift(storableItem);
+    }
+
+    persisted = safeSet(KEYS.INVOICES, rawInvoices) && persisted;
+
+    // Synchronize bidirectional convertedInvoiceId & status on quotations
+    let quotesChanged = false;
+    const syncedQuotes = rawQuotes.map((q) => {
+      if (resolvedQuotationId && q.id === resolvedQuotationId) {
+        if (q.status === 'declined') {
+          if (q.convertedInvoiceId !== itemToSave.id) {
+            quotesChanged = true;
+            return {
+              ...q,
+              convertedInvoiceId: itemToSave.id,
+              updatedAt: now,
+            };
+          }
+          return q;
+        }
+
+        const nextPreStatus = q.preConversionStatus ?? q.status;
+        if (
+          q.convertedInvoiceId !== itemToSave.id ||
+          q.status !== 'accepted' ||
+          q.preConversionStatus !== nextPreStatus
+        ) {
+          quotesChanged = true;
+          return {
+            ...q,
+            convertedInvoiceId: itemToSave.id,
+            preConversionStatus: nextPreStatus,
+            status: 'accepted' as QuotationStatus,
+            updatedAt: now,
+          };
+        }
+        return q;
+      }
+
+      const pointedToThisInvoice =
+        q.convertedInvoiceId === itemToSave.id ||
+        (existingRaw?.invoiceNumber && q.convertedInvoiceId === existingRaw.invoiceNumber);
+
+      if (pointedToThisInvoice) {
+        const otherReferencingInvoice = rawInvoices.find(
+          (other) =>
+            other.id !== itemToSave.id &&
+            resolveQuotationFromList(other.quotationId, rawQuotes)?.id === q.id
+        );
+
+        quotesChanged = true;
+        if (otherReferencingInvoice) {
+          return {
+            ...q,
+            convertedInvoiceId: otherReferencingInvoice.id,
+            updatedAt: now,
+          };
+        }
+
+        const restoredStatus = restoreUnlinkedQuotationStatus(q.status, q.expiryDate, q.preConversionStatus);
+        return {
+          ...q,
+          convertedInvoiceId: undefined,
+          preConversionStatus: undefined,
+          status: restoredStatus,
+          updatedAt: now,
+        };
+      }
+
+      return q;
+    });
+
+    if (quotesChanged) {
+      persisted = safeSet(KEYS.QUOTATIONS, syncedQuotes) && persisted;
+    }
+
+    if (idx === -1) {
       this.addActivity({
         type: 'invoice_created',
-        title: `Invoice ${invoice.invoiceNumber} Created`,
+        title: `Invoice ${trimmedNumber} Created`,
         description: `For ${invoice.clientSnapshot.name || 'Client'} (${invoice.currencySymbol} ${invoice.grandTotal.toLocaleString()})`,
         referenceId: invoice.id,
       });
     }
 
-    this.lastWritePersisted = safeSet(KEYS.INVOICES, rawInvoices);
+    this.lastWritePersisted = persisted;
     return itemToSave;
   },
 
   deleteInvoice(id: string): boolean {
     const invoices = safeGet<Invoice[]>(KEYS.INVOICES, []);
+    const targetInvoice = invoices.find((i) => i.id === id);
+    if (!targetInvoice) return false;
+
     const filtered = invoices.filter((i) => i.id !== id);
-    if (filtered.length !== invoices.length) {
-      safeSet(KEYS.INVOICES, filtered);
-      return true;
+    let persisted = safeSet(KEYS.INVOICES, filtered);
+
+    // Clear convertedInvoiceId on matching quotation and restore status if no other invoice references it
+    const rawQuotes = safeGet<Quotation[]>(KEYS.QUOTATIONS, []);
+    const linkedQuote = resolveQuotationFromList(targetInvoice.quotationId, rawQuotes);
+    const now = new Date().toISOString();
+    let quotesChanged = false;
+
+    const updatedQuotes = rawQuotes.map((q) => {
+      const matchesConvertedId =
+        q.convertedInvoiceId === id ||
+        (targetInvoice.invoiceNumber && q.convertedInvoiceId === targetInvoice.invoiceNumber);
+      const matchesLinked = Boolean(linkedQuote && q.id === linkedQuote.id);
+
+      if (!matchesConvertedId && !matchesLinked) {
+        return q;
+      }
+
+      const otherReferencingInvoice = filtered.find(
+        (other) => resolveQuotationFromList(other.quotationId, rawQuotes)?.id === q.id
+      );
+
+      if (otherReferencingInvoice) {
+        if (q.convertedInvoiceId !== otherReferencingInvoice.id) {
+          quotesChanged = true;
+          return {
+            ...q,
+            convertedInvoiceId: otherReferencingInvoice.id,
+            updatedAt: now,
+          };
+        }
+        return q;
+      }
+
+      const restoredStatus = restoreUnlinkedQuotationStatus(q.status, q.expiryDate, q.preConversionStatus);
+      if (
+        q.convertedInvoiceId !== undefined ||
+        q.preConversionStatus !== undefined ||
+        q.status !== restoredStatus
+      ) {
+        quotesChanged = true;
+        return {
+          ...q,
+          convertedInvoiceId: undefined,
+          preConversionStatus: undefined,
+          status: restoredStatus,
+          updatedAt: now,
+        };
+      }
+      return q;
+    });
+
+    if (quotesChanged) {
+      persisted = safeSet(KEYS.QUOTATIONS, updatedQuotes) && persisted;
     }
-    return false;
+
+    this.lastWritePersisted = persisted;
+    return true;
   },
 
   recordPayment(invoiceId: string, paymentData: Omit<PaymentRecord, 'id' | 'invoiceId' | 'recordedAt'>): Invoice | undefined {
@@ -583,7 +1102,8 @@ export const StorageService = {
       updatedAt: new Date().toISOString(),
     };
 
-    this.saveInvoice(updatedInvoice);
+    const saved = this.saveInvoice(updatedInvoice);
+    const invoicePersisted = this.lastWritePersisted;
 
     this.addActivity({
       type: 'payment_recorded',
@@ -592,7 +1112,8 @@ export const StorageService = {
       referenceId: invoice.id,
     });
 
-    return updatedInvoice;
+    this.lastWritePersisted = invoicePersisted;
+    return saved;
   },
 
   // Activity Logs
@@ -609,7 +1130,7 @@ export const StorageService = {
     };
     activities.unshift(newLog);
     // Keep last 40 logs
-    safeSet(KEYS.ACTIVITIES, activities.slice(0, 40));
+    this.lastWritePersisted = safeSet(KEYS.ACTIVITIES, activities.slice(0, 40));
   },
 
   exportBackupJson(): string {
@@ -626,32 +1147,98 @@ export const StorageService = {
   },
 
   importBackupJson(jsonString: string): boolean {
+    this.lastImportError = null;
     try {
-      const data = JSON.parse(jsonString);
-      if (data && data.profile && Array.isArray(data.clients)) {
-        const profileLogoUrl = data.profile.logoUrl || '';
-        const cache: Record<string, string> = {};
-        const quotes = ((data.quotations || []) as Quotation[]).map((q) =>
-          dehydrateSnapshotLogo(q, profileLogoUrl, cache)
-        );
-        const invoices = ((data.invoices || []) as Invoice[]).map((inv) =>
-          dehydrateSnapshotLogo(inv, profileLogoUrl, cache)
-        );
-
-        if (Object.keys(cache).length > 0) {
-          saveLogoCache(cache);
-        }
-        safeSet(KEYS.PROFILE, data.profile);
-        safeSet(KEYS.CLIENTS, data.clients || []);
-        safeSet(KEYS.QUOTATIONS, quotes);
-        safeSet(KEYS.INVOICES, invoices);
-        safeSet(KEYS.ACTIVITIES, data.activities || []);
-        writeRaw(KEYS.INITIALIZED, 'true');
-        return true;
+      const data: unknown = JSON.parse(jsonString);
+      if (!isPlainObject(data)) {
+        this.lastImportError = 'The selected file does not contain a valid Bizora backup object.';
+        return false;
       }
-      return false;
+
+      if (!isPlainObject(data.profile) || typeof data.profile.name !== 'string') {
+        this.lastImportError = 'Backup is missing a valid business profile.';
+        return false;
+      }
+
+      if (
+        !Array.isArray(data.clients) ||
+        !data.clients.every((c) => isPlainObject(c) && typeof c.id === 'string' && typeof c.name === 'string')
+      ) {
+        this.lastImportError = 'Backup contains missing or malformed client records.';
+        return false;
+      }
+
+      if (
+        data.quotations !== undefined &&
+        (!Array.isArray(data.quotations) ||
+          !data.quotations.every(
+            (q) => isPlainObject(q) && typeof q.id === 'string' && typeof q.quotationNumber === 'string'
+          ))
+      ) {
+        this.lastImportError = 'Backup contains malformed quotation records.';
+        return false;
+      }
+
+      if (
+        data.invoices !== undefined &&
+        (!Array.isArray(data.invoices) ||
+          !data.invoices.every(
+            (inv) => isPlainObject(inv) && typeof inv.id === 'string' && typeof inv.invoiceNumber === 'string'
+          ))
+      ) {
+        this.lastImportError = 'Backup contains malformed invoice records.';
+        return false;
+      }
+
+      if (
+        data.activities !== undefined &&
+        (!Array.isArray(data.activities) ||
+          !data.activities.every((act) => isPlainObject(act) && typeof act.id === 'string' && typeof act.title === 'string'))
+      ) {
+        this.lastImportError = 'Backup contains malformed activity log records.';
+        return false;
+      }
+
+      const profile = data.profile as unknown as BusinessProfile;
+      const clients = data.clients as unknown as Client[];
+      const profileLogoUrl = profile.logoUrl || '';
+      const cache: Record<string, string> = {};
+      const quotes = ((data.quotations ?? []) as unknown as Quotation[]).map((q) =>
+        dehydrateSnapshotLogo(q, profileLogoUrl, cache)
+      );
+      const invoices = ((data.invoices ?? []) as unknown as Invoice[]).map((inv) =>
+        dehydrateSnapshotLogo(inv, profileLogoUrl, cache)
+      );
+      const activities = (data.activities ?? []) as unknown as ActivityLog[];
+
+      let persisted = true;
+      if (Object.keys(cache).length > 0) {
+        persisted = saveLogoCache(cache) && persisted;
+      } else {
+        memoryStorage.delete(KEYS.LOGO_CACHE);
+        try {
+          localStorage.removeItem(KEYS.LOGO_CACHE);
+        } catch {
+          // ignore
+        }
+      }
+
+      persisted = safeSet(KEYS.PROFILE, profile) && persisted;
+      persisted = safeSet(KEYS.CLIENTS, clients) && persisted;
+      persisted = safeSet(KEYS.QUOTATIONS, quotes) && persisted;
+      persisted = safeSet(KEYS.INVOICES, invoices) && persisted;
+      persisted = safeSet(KEYS.ACTIVITIES, activities) && persisted;
+      persisted = writeRaw(KEYS.INITIALIZED, 'true') && persisted;
+
+      this.normalizeLegacyRelationships();
+      this.lastWritePersisted = persisted && this.lastWritePersisted;
+      return true;
     } catch (e) {
       console.error('Failed to import data:', e);
+      this.lastImportError =
+        e instanceof SyntaxError
+          ? 'The selected file is not valid JSON.'
+          : 'Could not read or validate the selected backup file.';
       return false;
     }
   },

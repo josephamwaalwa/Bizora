@@ -102,15 +102,34 @@ export const TopBar: React.FC<TopBarProps> = ({ onOpenMobileSidebar }) => {
     settings: 'Settings',
   };
 
-  const handleNotificationClick = (referenceId?: string) => {
+  const handleNotificationClick = (referenceId?: string, activityType?: string) => {
     if (!referenceId) return;
     setShowNotifications(false);
 
-    if (referenceId.startsWith('quo_') || referenceId.startsWith('QUO-')) {
-      const q = quotations.find((item) => item.id === referenceId || item.quotationNumber === referenceId);
+    const trimmed = referenceId.trim();
+    const matchedQuoteById = quotations.find((item) => item.id === trimmed);
+    if (matchedQuoteById) {
+      openDocumentPreview('quote', matchedQuoteById);
+      return;
+    }
+
+    const matchedInvoiceById = invoices.find((item) => item.id === trimmed);
+    if (matchedInvoiceById) {
+      openDocumentPreview('invoice', matchedInvoiceById);
+      return;
+    }
+
+    const normalized = trimmed.toLowerCase();
+    if (activityType?.startsWith('quote') || trimmed.startsWith('quo_') || trimmed.startsWith('QUO-')) {
+      const q = quotations.find((item) => item.quotationNumber.trim().toLowerCase() === normalized);
       if (q) openDocumentPreview('quote', q);
-    } else if (referenceId.startsWith('inv_') || referenceId.startsWith('INV-')) {
-      const inv = invoices.find((item) => item.id === referenceId || item.invoiceNumber === referenceId);
+    } else if (
+      activityType?.startsWith('invoice') ||
+      activityType === 'payment_recorded' ||
+      trimmed.startsWith('inv_') ||
+      trimmed.startsWith('INV-')
+    ) {
+      const inv = invoices.find((item) => item.invoiceNumber.trim().toLowerCase() === normalized);
       if (inv) openDocumentPreview('invoice', inv);
     }
   };
@@ -293,7 +312,7 @@ export const TopBar: React.FC<TopBarProps> = ({ onOpenMobileSidebar }) => {
                   activities.slice(0, 6).map((act) => (
                     <div
                       key={act.id}
-                      onClick={() => handleNotificationClick(act.referenceId)}
+                      onClick={() => handleNotificationClick(act.referenceId, act.type)}
                       className={`border-b border-line px-5 py-4 last:border-b-0 ${
                         act.referenceId ? 'cursor-pointer hover:bg-paper-sunken' : ''
                       }`}

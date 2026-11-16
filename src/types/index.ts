@@ -84,6 +84,7 @@ export interface Quotation {
   taxAmount: number;
   grandTotal: number;
   status: QuotationStatus;
+  preConversionStatus?: QuotationStatus;
   notes?: string;
   terms?: string;
   convertedInvoiceId?: string;

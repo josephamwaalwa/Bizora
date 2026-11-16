@@ -7,7 +7,7 @@ import { Textarea } from '../components/common/Textarea';
 import type { LineItem, Invoice, Client, InvoiceStatus } from '../types';
 import { calculateDocumentFinancials, calculateLineItemTotal, calculateInvoiceBalances } from '../utils/calculations';
 import { formatCurrency } from '../utils/formatters';
-import { generateId, formatDocNumber } from '../utils/idGenerator';
+import { generateId } from '../utils/idGenerator';
 import { StorageService } from '../services/storage';
 import {
   Plus,
@@ -27,6 +27,9 @@ export const InvoiceFormPage: React.FC = () => {
     businessProfile,
     saveInvoice,
     saveClient,
+    getNextInvoiceNumber,
+    commitInvoiceNumber,
+    isInvoiceNumberTaken,
     openDocumentPreview,
     addToast,
   } = useApp();
@@ -52,11 +55,17 @@ export const InvoiceFormPage: React.FC = () => {
   // Invoice Meta
   const [invoiceNumber, setInvoiceNumber] = useState<string>(() => {
     if (existingInvoice) return existingInvoice.invoiceNumber;
-    const nextNum = businessProfile.nextInvoiceNumber || 1;
-    return formatDocNumber(businessProfile.invoicePrefix || 'INV-', nextNum);
+    return getNextInvoiceNumber();
   });
 
-  const [quotationId, setQuotationId] = useState<string>(existingInvoice?.quotationId || '');
+  const [quotationId, setQuotationId] = useState<string>(() => {
+    const rawRef = existingInvoice?.quotationId?.trim();
+    if (!rawRef) return '';
+    const matchedQuote = quotations.find(
+      (q) => q.id === rawRef || q.quotationNumber.trim().toLowerCase() === rawRef.toLowerCase()
+    );
+    return matchedQuote ? matchedQuote.id : '';
+  });
 
   const [issueDate, setIssueDate] = useState<string>(() => {
     return existingInvoice?.issueDate || new Date().toISOString().split('T')[0];
@@ -131,7 +140,8 @@ export const InvoiceFormPage: React.FC = () => {
   const currentPayments = existingInvoice?.payments || [];
   const { amountPaid, outstandingBalance } = calculateInvoiceBalances(financials.grandTotal, currentPayments);
 
-  const currentClient = clients.find((c) => c.id === selectedClientId) || existingInvoice?.clientSnapshot;
+  const matchedClient = clients.find((c) => c.id === selectedClientId);
+  const currentClient = matchedClient || existingInvoice?.clientSnapshot;
 
   const handleAddItem = () => {
     setItems((prev) => [
@@ -170,12 +180,15 @@ export const InvoiceFormPage: React.FC = () => {
     );
   };
 
-  const handleQuickAddClient = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleQuickAddClient = (e?: React.FormEvent) => {
+    e?.preventDefault();
     if (!newClientName.trim()) {
-      setErrorMsg('Client name is required.');
+      const msg = 'Client name is required.';
+      setErrorMsg(msg);
+      addToast({ type: 'error', title: 'Missing Client Name', message: msg });
       return;
     }
+    setErrorMsg('');
     const created = saveClient({
       name: newClientName.trim(),
       companyName: newClientCompany.trim() || undefined,
@@ -192,39 +205,126 @@ export const InvoiceFormPage: React.FC = () => {
     setNewClientAddress('');
   };
 
+  const reportValidationError = (message: string) => {
+    setErrorMsg(message);
+    addToast({
+      type: 'error',
+      title: 'Cannot Save Invoice',
+      message,
+    });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const findLinkedInvoiceForQuotation = (quoteId: string, quoteNumber: string) => {
+    const normalizedQuoteNum = quoteNumber.trim().toLowerCase();
+    return invoices.find((inv) => {
+      if (inv.id === existingInvoice?.id) return false;
+      const invQuoteRef = inv.quotationId?.trim();
+      const linkedByInvoiceRef =
+        invQuoteRef === quoteId ||
+        (invQuoteRef && invQuoteRef.toLowerCase() === normalizedQuoteNum);
+      const quote = quotations.find((q) => q.id === quoteId);
+      const linkedByQuotePtr = quote?.convertedInvoiceId === inv.id;
+      return Boolean(linkedByInvoiceRef || linkedByQuotePtr);
+    });
+  };
+
   const handleSave = (viewAfterSave: boolean = false) => {
     setErrorMsg('');
 
-    if (!selectedClientId && !currentClient) {
-      setErrorMsg('Please select or add a client.');
+    let clientToUse: Client | undefined = matchedClient;
+
+    if (isAddingNewClient) {
+      if (newClientName.trim()) {
+        clientToUse = saveClient({
+          name: newClientName.trim(),
+          companyName: newClientCompany.trim() || undefined,
+          email: newClientEmail.trim() || `${newClientName.toLowerCase().replace(/\s+/g, '')}@example.com`,
+          phone: newClientPhone.trim(),
+          address: newClientAddress.trim(),
+        });
+        setSelectedClientId(clientToUse.id);
+        setIsAddingNewClient(false);
+        setNewClientName('');
+        setNewClientCompany('');
+        setNewClientEmail('');
+        setNewClientPhone('');
+        setNewClientAddress('');
+      } else if (!clientToUse) {
+        reportValidationError('Please enter a client name or select an existing client.');
+        return;
+      }
+    }
+
+    if (!clientToUse) {
+      reportValidationError(
+        isEditing && existingInvoice?.clientSnapshot
+          ? 'The original client record was deleted. Please select an existing client or quick-add a client before saving.'
+          : 'Please select or add a client before saving.'
+      );
       return;
     }
 
-    if (items.some((item) => !item.description.trim())) {
-      setErrorMsg('Please enter a description for all line items.');
+    if (items.length === 0 || items.some((item) => !item.description.trim())) {
+      reportValidationError('Please enter a description for all line items.');
       return;
     }
 
-    const clientToSave: Client = currentClient || {
-      id: selectedClientId || generateId('cli'),
-      name: 'Client',
-      email: '',
-      phone: '',
-      address: '',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
+    const finalInvoiceNumber =
+      invoiceNumber.trim() ||
+      (existingInvoice ? existingInvoice.invoiceNumber : getNextInvoiceNumber());
 
-    if (!isEditing) {
-      StorageService.incrementInvoiceNumber();
+    if (isInvoiceNumberTaken(finalInvoiceNumber, existingInvoice?.id)) {
+      reportValidationError(
+        `Invoice number "${finalInvoiceNumber}" already exists. Please enter a unique invoice number.`
+      );
+      return;
+    }
+
+    let resolvedQuotationId: string | undefined;
+    const rawQuotationRef = quotationId.trim();
+    if (rawQuotationRef) {
+      const matchedQuote = quotations.find(
+        (q) =>
+          q.id === rawQuotationRef ||
+          q.quotationNumber.trim().toLowerCase() === rawQuotationRef.toLowerCase()
+      );
+      if (!matchedQuote) {
+        reportValidationError('The selected quotation no longer exists. Please choose another quotation or clear the link.');
+        return;
+      }
+
+      const isAlreadyLinkedToCurrent = Boolean(
+        existingInvoice &&
+          ((existingInvoice.quotationId &&
+            (existingInvoice.quotationId === matchedQuote.id ||
+              existingInvoice.quotationId.trim().toLowerCase() === matchedQuote.quotationNumber.trim().toLowerCase())) ||
+            matchedQuote.convertedInvoiceId === existingInvoice.id)
+      );
+
+      if (matchedQuote.status === 'declined' && !isAlreadyLinkedToCurrent) {
+        reportValidationError(
+          `Quotation ${matchedQuote.quotationNumber} is declined and cannot be linked to an invoice.`
+        );
+        return;
+      }
+
+      const conflictingInvoice = findLinkedInvoiceForQuotation(matchedQuote.id, matchedQuote.quotationNumber);
+      if (conflictingInvoice) {
+        reportValidationError(
+          `Quotation ${matchedQuote.quotationNumber} is already linked to Invoice ${conflictingInvoice.invoiceNumber}.`
+        );
+        return;
+      }
+      resolvedQuotationId = matchedQuote.id;
     }
 
     const invoiceToSave: Invoice = {
       id: existingInvoice?.id || generateId('inv'),
-      invoiceNumber: invoiceNumber.trim() || 'INV-0001',
-      quotationId: quotationId.trim() || undefined,
-      clientId: clientToSave.id,
-      clientSnapshot: clientToSave,
+      invoiceNumber: finalInvoiceNumber,
+      quotationId: resolvedQuotationId,
+      clientId: clientToUse.id,
+      clientSnapshot: clientToUse,
       businessSnapshot: businessProfile,
       issueDate,
       dueDate,
@@ -250,6 +350,13 @@ export const InvoiceFormPage: React.FC = () => {
     };
 
     const saved = saveInvoice(invoiceToSave);
+    if (!saved) {
+      return;
+    }
+
+    if (!isEditing && StorageService.lastWritePersisted) {
+      commitInvoiceNumber(saved.invoiceNumber);
+    }
 
     if (viewAfterSave) {
       openDocumentPreview('invoice', saved);
@@ -263,6 +370,7 @@ export const InvoiceFormPage: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-line">
         <div className="flex items-center gap-3">
           <Button
+            type="button"
             variant="secondary"
             size="sm"
             onClick={() => setActiveView('invoices')}
@@ -281,10 +389,11 @@ export const InvoiceFormPage: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          <Button variant="secondary" size="sm" onClick={() => handleSave(false)}>
+          <Button type="button" variant="secondary" size="sm" onClick={() => handleSave(false)}>
             Save Draft
           </Button>
           <Button
+            type="button"
             variant="primary"
             size="sm"
             onClick={() => handleSave(true)}
@@ -394,10 +503,10 @@ export const InvoiceFormPage: React.FC = () => {
                   placeholder="Street, City, Namibia"
                 />
                 <div className="flex justify-end gap-2 pt-1">
-                  <Button variant="secondary" size="sm" onClick={() => setIsAddingNewClient(false)}>
+                  <Button type="button" variant="secondary" size="sm" onClick={() => setIsAddingNewClient(false)}>
                     Cancel
                   </Button>
-                  <Button variant="primary" size="sm" onClick={handleQuickAddClient}>
+                  <Button type="button" variant="primary" size="sm" onClick={() => handleQuickAddClient()}>
                     Save & Select
                   </Button>
                 </div>
@@ -418,12 +527,17 @@ export const InvoiceFormPage: React.FC = () => {
                 ) : (
                   <Select
                     label="Select Client"
-                    value={selectedClientId}
+                    value={matchedClient ? selectedClientId : ''}
                     onChange={(e) => setSelectedClientId(e.target.value)}
-                    options={clients.map((c) => ({
-                      value: c.id,
-                      label: `${c.name}${c.companyName ? ` (${c.companyName})` : ''}`,
-                    }))}
+                    options={[
+                      ...(!matchedClient
+                        ? [{ value: '', label: 'Select an existing client...' }]
+                        : []),
+                      ...clients.map((c) => ({
+                        value: c.id,
+                        label: `${c.name}${c.companyName ? ` (${c.companyName})` : ''}`,
+                      })),
+                    ]}
                   />
                 )}
 
@@ -433,6 +547,11 @@ export const InvoiceFormPage: React.FC = () => {
                     {currentClient.companyName && <p>{currentClient.companyName}</p>}
                     <p>{currentClient.email} • {currentClient.phone}</p>
                     {currentClient.address && <p>{currentClient.address}</p>}
+                    {!matchedClient && (
+                      <p className="pt-1 text-[#8E3B32] dark:text-rose-400 font-medium">
+                        Original client record was removed. Select an existing client or quick-add a client to save.
+                      </p>
+                    )}
                   </div>
                 )}
               </div>
@@ -446,6 +565,7 @@ export const InvoiceFormPage: React.FC = () => {
                 Itemised Billed Services & Products
               </span>
               <Button
+                type="button"
                 variant="secondary"
                 size="sm"
                 onClick={handleAddItem}
@@ -553,7 +673,12 @@ export const InvoiceFormPage: React.FC = () => {
               label="Invoice Number"
               value={invoiceNumber}
               onChange={(e) => setInvoiceNumber(e.target.value)}
-              required
+              placeholder={existingInvoice ? existingInvoice.invoiceNumber : 'Auto-assigned if blank'}
+              helperText={
+                isEditing
+                  ? 'Leave blank to keep the current invoice number.'
+                  : 'Leave blank to auto-assign the next sequential number.'
+              }
             />
 
             <Select
@@ -563,11 +688,25 @@ export const InvoiceFormPage: React.FC = () => {
               onChange={(e) => setQuotationId(e.target.value)}
             >
               <option value="">No linked quotation</option>
-              {quotations.map((q) => (
-                <option key={q.id} value={q.id}>
-                  {q.quotationNumber} — {q.clientSnapshot.name} ({formatCurrency(q.grandTotal, q.currency, q.currencySymbol)})
-                </option>
-              ))}
+              {quotations.map((q) => {
+                const linkedInvoice = findLinkedInvoiceForQuotation(q.id, q.quotationNumber);
+                const isAlreadyLinkedToCurrent = Boolean(
+                  existingInvoice &&
+                    ((existingInvoice.quotationId &&
+                      (existingInvoice.quotationId === q.id ||
+                        existingInvoice.quotationId.trim().toLowerCase() === q.quotationNumber.trim().toLowerCase())) ||
+                      q.convertedInvoiceId === existingInvoice.id)
+                );
+                const isDeclinedBlocked = q.status === 'declined' && !isAlreadyLinkedToCurrent;
+
+                return (
+                  <option key={q.id} value={q.id} disabled={Boolean(linkedInvoice) || isDeclinedBlocked}>
+                    {q.quotationNumber} — {q.clientSnapshot.name} ({formatCurrency(q.grandTotal, q.currency, q.currencySymbol)})
+                    {linkedInvoice ? ` [Linked to ${linkedInvoice.invoiceNumber}]` : ''}
+                    {isDeclinedBlocked ? ' [Declined]' : ''}
+                  </option>
+                );
+              })}
             </Select>
 
             <Select
@@ -739,6 +878,7 @@ export const InvoiceFormPage: React.FC = () => {
 
             <div className="pt-2">
               <Button
+                type="button"
                 variant="primary"
                 size="md"
                 className="w-full"

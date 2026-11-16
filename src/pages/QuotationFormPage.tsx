@@ -7,7 +7,7 @@ import { Textarea } from '../components/common/Textarea';
 import type { LineItem, Quotation, Client, QuotationStatus } from '../types';
 import { calculateDocumentFinancials, calculateLineItemTotal } from '../utils/calculations';
 import { formatCurrency } from '../utils/formatters';
-import { generateId, formatDocNumber } from '../utils/idGenerator';
+import { generateId } from '../utils/idGenerator';
 import { StorageService } from '../services/storage';
 import {
   Plus,
@@ -26,9 +26,11 @@ export const QuotationFormPage: React.FC = () => {
     businessProfile,
     saveQuotation,
     saveClient,
+    getNextQuoteNumber,
+    commitQuoteNumber,
+    isQuotationNumberTaken,
     openDocumentPreview,
     addToast,
-    refreshData,
   } = useApp();
 
   const isEditing = Boolean(activeEntityId);
@@ -52,8 +54,7 @@ export const QuotationFormPage: React.FC = () => {
   // Quotation Meta
   const [quotationNumber, setQuotationNumber] = useState<string>(() => {
     if (existingQuote) return existingQuote.quotationNumber;
-    const nextNum = businessProfile.nextQuoteNumber || 1;
-    return formatDocNumber(businessProfile.quotePrefix || 'QUO-', nextNum);
+    return getNextQuoteNumber();
   });
 
   const [issueDate, setIssueDate] = useState<string>(() => {
@@ -126,7 +127,8 @@ export const QuotationFormPage: React.FC = () => {
     taxName,
   });
 
-  const currentClient = clients.find((c) => c.id === selectedClientId) || existingQuote?.clientSnapshot;
+  const matchedClient = clients.find((c) => c.id === selectedClientId);
+  const currentClient = matchedClient || existingQuote?.clientSnapshot;
 
   const handleAddItem = () => {
     setItems((prev) => [
@@ -203,7 +205,7 @@ export const QuotationFormPage: React.FC = () => {
   const handleSave = (viewAfterSave: boolean = false) => {
     setErrorMsg('');
 
-    let clientToUse: Client | undefined = currentClient;
+    let clientToUse: Client | undefined = matchedClient;
 
     if (isAddingNewClient) {
       if (newClientName.trim()) {
@@ -228,7 +230,11 @@ export const QuotationFormPage: React.FC = () => {
     }
 
     if (!clientToUse) {
-      reportValidationError('Please select or add a client before saving.');
+      reportValidationError(
+        isEditing && existingQuote?.clientSnapshot
+          ? 'The original client record was deleted. Please select an existing client or quick-add a client before saving.'
+          : 'Please select or add a client before saving.'
+      );
       return;
     }
 
@@ -237,14 +243,20 @@ export const QuotationFormPage: React.FC = () => {
       return;
     }
 
-    const fallbackQuoteNumber = formatDocNumber(
-      businessProfile.quotePrefix || 'QUO-',
-      businessProfile.nextQuoteNumber || 1
-    );
+    const finalQuoteNumber =
+      quotationNumber.trim() ||
+      (existingQuote ? existingQuote.quotationNumber : getNextQuoteNumber());
+
+    if (isQuotationNumberTaken(finalQuoteNumber, existingQuote?.id)) {
+      reportValidationError(
+        `Quotation number "${finalQuoteNumber}" already exists. Please enter a unique quotation number.`
+      );
+      return;
+    }
 
     const quoteToSave: Quotation = {
       id: existingQuote?.id || generateId('quo'),
-      quotationNumber: quotationNumber.trim() || fallbackQuoteNumber,
+      quotationNumber: finalQuoteNumber,
       clientId: clientToUse.id,
       clientSnapshot: clientToUse,
       businessSnapshot: businessProfile,
@@ -265,15 +277,18 @@ export const QuotationFormPage: React.FC = () => {
       notes: notes.trim() || undefined,
       terms: terms.trim() || undefined,
       convertedInvoiceId: existingQuote?.convertedInvoiceId,
+      preConversionStatus: existingQuote?.preConversionStatus,
       createdAt: existingQuote?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
 
     const saved = saveQuotation(quoteToSave);
+    if (!saved) {
+      return;
+    }
 
-    if (!isEditing) {
-      StorageService.incrementQuoteNumber();
-      refreshData();
+    if (!isEditing && StorageService.lastWritePersisted) {
+      commitQuoteNumber(saved.quotationNumber);
     }
 
     if (viewAfterSave) {
@@ -449,12 +464,17 @@ export const QuotationFormPage: React.FC = () => {
                 ) : (
                   <Select
                     label="Select Client"
-                    value={selectedClientId}
+                    value={matchedClient ? selectedClientId : ''}
                     onChange={(e) => setSelectedClientId(e.target.value)}
-                    options={clients.map((c) => ({
-                      value: c.id,
-                      label: `${c.name}${c.companyName ? ` (${c.companyName})` : ''}`,
-                    }))}
+                    options={[
+                      ...(!matchedClient
+                        ? [{ value: '', label: 'Select an existing client...' }]
+                        : []),
+                      ...clients.map((c) => ({
+                        value: c.id,
+                        label: `${c.name}${c.companyName ? ` (${c.companyName})` : ''}`,
+                      })),
+                    ]}
                   />
                 )}
 
@@ -464,6 +484,11 @@ export const QuotationFormPage: React.FC = () => {
                     {currentClient.companyName && <p>{currentClient.companyName}</p>}
                     <p>{currentClient.email} • {currentClient.phone}</p>
                     {currentClient.address && <p>{currentClient.address}</p>}
+                    {!matchedClient && (
+                      <p className="pt-1 text-[#8E3B32] dark:text-rose-400 font-medium">
+                        Original client record was removed. Select an existing client or quick-add a client to save.
+                      </p>
+                    )}
                   </div>
                 )}
               </div>
@@ -585,7 +610,12 @@ export const QuotationFormPage: React.FC = () => {
               label="Quotation Number"
               value={quotationNumber}
               onChange={(e) => setQuotationNumber(e.target.value)}
-              required
+              placeholder={existingQuote ? existingQuote.quotationNumber : 'Auto-assigned if blank'}
+              helperText={
+                isEditing
+                  ? 'Leave blank to keep the current quotation number.'
+                  : 'Leave blank to auto-assign the next sequential number.'
+              }
             />
 
             <Select

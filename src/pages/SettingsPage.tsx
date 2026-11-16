@@ -88,10 +88,21 @@ export const SettingsPage: React.FC = () => {
 
   const applyImportedBackupContent = (content: string) => {
     const success = StorageService.importBackupJson(content);
-    if (success) {
-      refreshData();
-      setProfile(StorageService.getBusinessProfile());
-      setLogoPreview(StorageService.getBusinessProfile().logoUrl || '');
+    if (!success) {
+      addToast({
+        type: 'error',
+        title: 'Invalid Backup File',
+        message: StorageService.lastImportError || 'The selected file is not a valid Bizora backup JSON.',
+      });
+      return;
+    }
+
+    const persisted = StorageService.lastWritePersisted;
+    refreshData();
+    setProfile(StorageService.getBusinessProfile());
+    setLogoPreview(StorageService.getBusinessProfile().logoUrl || '');
+
+    if (persisted) {
       addToast({
         type: 'success',
         title: 'Backup Restored',
@@ -99,9 +110,9 @@ export const SettingsPage: React.FC = () => {
       });
     } else {
       addToast({
-        type: 'error',
-        title: 'Invalid File',
-        message: 'The selected file is not a valid Bizora backup JSON.',
+        type: 'warning',
+        title: 'Loaded in Active Session Only',
+        message: 'Backup records were loaded into memory, but browser storage could not persist all data across reloads.',
       });
     }
   };
