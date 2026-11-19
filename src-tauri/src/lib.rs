@@ -107,7 +107,11 @@ pub fn run() {
             db::commands::delete_app_setting,
             db::commands::get_migration_status,
             db::commands::backup_legacy_localstorage,
-            db::commands::migrate_legacy_workspace
+            db::commands::migrate_legacy_workspace,
+            db::commands::mark_migration_not_needed,
+            db::commands::record_migration_error,
+            db::commands::replace_desktop_workspace,
+            db::commands::clear_desktop_workspace
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

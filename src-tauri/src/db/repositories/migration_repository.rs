@@ -9,9 +9,12 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 use crate::db::dto::{
-    BackupLegacyStorageInput, BackupLegacyStorageResult, LegacyWorkspaceMigrationInput,
-    LineItemInput, MigrationCountsDto, MigrationDiagnosticDto, MigrationResultDto, MigrationState,
-    MigrationStatusDto,
+    BackupLegacyStorageInput, BackupLegacyStorageResult, CreateActivityLogInput,
+    CreateBusinessAssetInput, CreateBusinessInput, CreateClientInput, CreateInvoiceInput,
+    CreateLocalProfileInput, CreatePaymentInput, CreateQuotationInput,
+    LegacyWorkspaceMigrationInput, LineItemInput, MigrationCountsDto, MigrationDiagnosticDto,
+    MigrationResultDto, MigrationState, MigrationStatusDto, ReplaceDesktopWorkspaceInput,
+    SaveAppSettingInput, WorkspaceLifecycleResultDto,
 };
 use crate::db::precision::{require_non_negative, require_positive, SafeI64};
 use crate::db::repositories::{
@@ -466,6 +469,25 @@ fn read_setting_json(conn: &Connection, key: &str) -> Result<Option<String>, DbE
     .map_err(|err| map_rusqlite_error(err, "reading migration setting"))
 }
 
+fn parse_marker_payload(raw_json: &str) -> Result<(MigrationState, MigrationMarkerPayload), DbError> {
+    let marker: MigrationMarkerPayload = serde_json::from_str(raw_json).map_err(|_| {
+        DbError::Integrity("Stored migration marker is malformed JSON".to_string())
+    })?;
+
+    let state = match marker.status.as_str() {
+        "completed" => MigrationState::Completed,
+        "not_needed" => MigrationState::NotNeeded,
+        "conflict_existing_data" => MigrationState::ConflictExistingData,
+        other => {
+            return Err(DbError::Integrity(format!(
+                "Unknown stored migration marker status '{other}'"
+            )));
+        }
+    };
+
+    Ok((state, marker))
+}
+
 pub fn get_migration_status(conn: &Connection) -> Result<MigrationStatusDto, DbError> {
     let existing_counts = collect_counts(conn)?;
     let raw_marker = read_setting_json(conn, MIGRATION_SETTING_KEY)?;
@@ -476,21 +498,7 @@ pub fn get_migration_status(conn: &Connection) -> Result<MigrationStatusDto, DbE
     });
 
     if let Some(marker_json) = raw_marker {
-        let marker: MigrationMarkerPayload =
-            serde_json::from_str(&marker_json).map_err(|_| {
-                DbError::Integrity("Stored migration marker is malformed JSON".to_string())
-            })?;
-
-        let state = match marker.status.as_str() {
-            "completed" => MigrationState::Completed,
-            "not_needed" => MigrationState::NotNeeded,
-            "conflict_existing_data" => MigrationState::ConflictExistingData,
-            other => {
-                return Err(DbError::Integrity(format!(
-                    "Unknown stored migration marker status '{other}'"
-                )));
-            }
-        };
+        let (state, marker) = parse_marker_payload(&marker_json)?;
 
         return Ok(MigrationStatusDto {
             state,
@@ -520,23 +528,147 @@ pub fn get_migration_status(conn: &Connection) -> Result<MigrationStatusDto, DbE
     })
 }
 
-pub fn sanitize_diagnostic(mut d: MigrationDiagnosticDto) -> MigrationDiagnosticDto {
-    if let Some(val) = d.original_value.take() {
-        let cleaned: String = val
-            .chars()
-            .filter(|c| !c.is_control() || *c == ' ')
-            .take(120)
-            .collect();
-        d.original_value = Some(cleaned);
+fn redact_data_uris(input: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    let mut out = String::with_capacity(input.len());
+    let mut cursor = 0usize;
+
+    while let Some(rel) = lower[cursor..].find("data:") {
+        let start = cursor + rel;
+        let rest_lower = &lower[start..];
+        let token_len = input[start..]
+            .find(char::is_whitespace)
+            .unwrap_or_else(|| input.len() - start);
+        let header: String = rest_lower[..token_len].chars().take(96).collect();
+
+        if header.contains(";base64,")
+            || header.starts_with("data:image/")
+            || header.starts_with("data:application/")
+            || header.starts_with("data:text/")
+        {
+            out.push_str(&input[cursor..start]);
+            out.push_str("[REDACTED_DATA_URI]");
+            cursor = start + token_len;
+        } else {
+            let advance = "data:".len();
+            out.push_str(&input[cursor..start + advance]);
+            cursor = start + advance;
+        }
     }
+
+    out.push_str(&input[cursor..]);
+    out
+}
+
+fn contains_jwt_like_token(text: &str) -> bool {
+    text.split_whitespace().any(|tok| {
+        let trimmed = tok.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != '-' && c != '_');
+        trimmed.starts_with("eyJ") && trimmed.len() >= 20 && trimmed.matches('.').count() >= 2
+    })
+}
+
+fn sanitize_diagnostic_text(raw: &str, max_chars: usize) -> String {
+    let stripped: String = raw
+        .chars()
+        .filter_map(|c| {
+            if matches!(c, '\r' | '\n' | '\t') {
+                Some(' ')
+            } else if c.is_control() {
+                None
+            } else {
+                Some(c)
+            }
+        })
+        .collect();
+
+    let collapsed = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
+    let uri_redacted = redact_data_uris(&collapsed);
+    let trimmed = uri_redacted.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let looks_like_raw_storage = ALLOWED_LEGACY_KEYS.iter().any(|k| lower.contains(k))
+        || (trimmed.starts_with('{') && trimmed.ends_with('}'))
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+        || trimmed.starts_with("{\"")
+        || trimmed.starts_with("[{\"")
+        || trimmed.contains("\":{\"")
+        || trimmed.contains("\":[{\"");
+
+    if looks_like_raw_storage {
+        return "[REDACTED_RAW_PAYLOAD]"
+            .chars()
+            .take(max_chars)
+            .collect();
+    }
+
+    let looks_like_secret = lower.contains("bearer ")
+        || lower.contains("password=")
+        || lower.contains("password:")
+        || lower.contains("\"password\"")
+        || lower.contains("secret=")
+        || lower.contains("secret:")
+        || lower.contains("client_secret")
+        || lower.contains("service_role")
+        || lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("access_token")
+        || lower.contains("refresh_token")
+        || lower.contains("private_key")
+        || lower.contains("token=")
+        || contains_jwt_like_token(trimmed);
+
+    if looks_like_secret {
+        return "[REDACTED_SECRET]".chars().take(max_chars).collect();
+    }
+
+    trimmed.chars().take(max_chars).collect()
+}
+
+fn sanitize_optional_diagnostic_text(raw: Option<String>, max_chars: usize) -> Option<String> {
+    raw.and_then(|val| {
+        let cleaned = sanitize_diagnostic_text(&val, max_chars);
+        if cleaned.is_empty() {
+            None
+        } else {
+            Some(cleaned)
+        }
+    })
+}
+
+pub fn sanitize_diagnostic(mut d: MigrationDiagnosticDto) -> MigrationDiagnosticDto {
+    d.code = sanitize_diagnostic_text(&d.code, 80);
+    d.severity = sanitize_diagnostic_text(&d.severity, 32).to_ascii_lowercase();
+    d.stage = sanitize_diagnostic_text(&d.stage, 64);
+    d.entity_type = sanitize_diagnostic_text(&d.entity_type, 64);
+    d.record_id = sanitize_optional_diagnostic_text(d.record_id.take(), 120);
+    d.field = sanitize_optional_diagnostic_text(d.field.take(), 120);
+    d.original_value = sanitize_optional_diagnostic_text(d.original_value.take(), 120);
+    d.message = sanitize_diagnostic_text(&d.message, 400);
+    d.suggested_action = sanitize_diagnostic_text(&d.suggested_action, 400);
     d
+}
+
+fn sanitize_and_validate_diagnostic(
+    diagnostic: &MigrationDiagnosticDto,
+) -> Result<MigrationDiagnosticDto, DbError> {
+    let sanitized = sanitize_diagnostic(diagnostic.clone());
+    let _ = require_trimmed_non_empty(&sanitized.code, "code")?;
+    let _ = validate_enum(&sanitized.severity, &["error", "warning", "info"], "severity")?;
+    let _ = require_trimmed_non_empty(&sanitized.stage, "stage")?;
+    let _ = require_trimmed_non_empty(&sanitized.entity_type, "entityType")?;
+    let _ = require_trimmed_non_empty(&sanitized.message, "message")?;
+    let _ = require_trimmed_non_empty(&sanitized.suggested_action, "suggestedAction")?;
+    Ok(sanitized)
 }
 
 pub fn record_migration_error(
     conn: &mut Connection,
     diagnostic: &MigrationDiagnosticDto,
-) -> Result<(), DbError> {
-    let sanitized = sanitize_diagnostic(diagnostic.clone());
+) -> Result<MigrationDiagnosticDto, DbError> {
+    let sanitized = sanitize_and_validate_diagnostic(diagnostic)?;
     let value_json = serde_json::to_string(&sanitized)
         .map_err(|_| DbError::Config("Failed to serialize migration error state".to_string()))?;
     let updated_at = current_utc_iso(conn)?;
@@ -558,7 +690,123 @@ pub fn record_migration_error(
     tx.commit()
         .map_err(|err| map_rusqlite_error(err, "committing migration diagnostic error"))?;
 
-    Ok(())
+    Ok(sanitized)
+}
+
+fn normalize_lifecycle_source(
+    source: Option<&str>,
+    default_source: &str,
+) -> Result<String, DbError> {
+    match source {
+        None => Ok(default_source.to_string()),
+        Some(raw) => {
+            if raw.chars().any(|c| c.is_control()) {
+                return Err(DbError::InvalidInput {
+                    field: Some("source".to_string()),
+                    message: "source must not contain control characters".to_string(),
+                });
+            }
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(DbError::InvalidInput {
+                    field: Some("source".to_string()),
+                    message: "source cannot be blank when provided".to_string(),
+                });
+            }
+            if trimmed.chars().count() > 64 {
+                return Err(DbError::InvalidInput {
+                    field: Some("source".to_string()),
+                    message: "source exceeds maximum allowed length of 64 characters".to_string(),
+                });
+            }
+            Ok(trimmed.to_string())
+        }
+    }
+}
+
+/// Atomically records `migration.localstorage_v1` with `status: "not_needed"` when SQLite
+/// contains no unmigrated business data and no `completed` / `conflict_existing_data` marker.
+pub fn mark_migration_not_needed(
+    conn: &mut Connection,
+    source: Option<&str>,
+) -> Result<MigrationStatusDto, DbError> {
+    let source = normalize_lifecycle_source(source, "desktop_fresh_install")?;
+    let now_utc = current_utc_iso(conn)?;
+
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|err| DbError::TransactionFailed(format!("Failed to begin transaction: {err}")))?;
+
+    let existing_counts = collect_counts(&tx)?;
+    let has_data = has_existing_business_data(&existing_counts);
+    let raw_marker = read_setting_json(&tx, MIGRATION_SETTING_KEY)?;
+
+    if let Some(marker_json) = raw_marker {
+        let (state, _marker) = parse_marker_payload(&marker_json)?;
+        match state {
+            MigrationState::Completed => {
+                return Err(DbError::UniqueConstraint(
+                    "Cannot mark legacy migration as not needed because migration is already completed".to_string(),
+                ));
+            }
+            MigrationState::ConflictExistingData => {
+                return Err(DbError::UniqueConstraint(
+                    "Cannot mark legacy migration as not needed while SQLite migration conflict exists".to_string(),
+                ));
+            }
+            MigrationState::NotNeeded => {
+                tx.commit().map_err(|err| {
+                    map_rusqlite_error(err, "finalizing migration status check")
+                })?;
+                return get_migration_status(conn);
+            }
+            MigrationState::Absent => {
+                return Err(DbError::Integrity(
+                    "Stored migration marker resolved to unexpected absent state".to_string(),
+                ));
+            }
+        }
+    }
+
+    if has_data {
+        return Err(DbError::UniqueConstraint(
+            "Cannot mark legacy migration as not needed because SQLite already contains existing business data requiring conflict resolution".to_string(),
+        ));
+    }
+
+    let marker_payload = MigrationMarkerPayload {
+        version: MIGRATION_MARKER_VERSION,
+        status: "not_needed".to_string(),
+        source,
+        migrated_business_id: None,
+        local_profile_id: None,
+        backup_filename: None,
+        counts: Some(existing_counts),
+        diagnostics: Vec::new(),
+        completed_at: Some(now_utc.clone()),
+    };
+
+    let marker_json = serde_json::to_string(&marker_payload).map_err(|_| {
+        DbError::Config("Failed to serialize migration not_needed marker".to_string())
+    })?;
+
+    tx.execute(
+        "INSERT INTO app_settings (key, value_json, updated_at)
+         VALUES (?1, ?2, ?3);",
+        params![MIGRATION_SETTING_KEY, marker_json, now_utc],
+    )
+    .map_err(|err| map_rusqlite_error(err, "saving migration not_needed marker"))?;
+
+    tx.execute(
+        "DELETE FROM app_settings WHERE key = ?1;",
+        params![MIGRATION_ERROR_SETTING_KEY],
+    )
+    .map_err(|err| map_rusqlite_error(err, "clearing prior migration error diagnostic"))?;
+
+    tx.commit()
+        .map_err(|err| map_rusqlite_error(err, "committing migration not_needed marker"))?;
+
+    get_migration_status(conn)
 }
 
 // ============================================================
@@ -586,48 +834,50 @@ fn validate_line_items_for_migration(
     Ok(())
 }
 
-fn validate_migration_payload(input: &LegacyWorkspaceMigrationInput) -> Result<(), DbError> {
-    if let Some(err_diag) = input.diagnostics.iter().find(|d| d.severity == "error") {
-        return Err(DbError::InvalidInput {
-            field: err_diag.field.clone(),
-            message: format!(
-                "Migration payload contains unresolved error diagnostic {}: {}",
-                err_diag.code, err_diag.message
-            ),
-        });
-    }
+struct WorkspaceSnapshotRef<'a> {
+    local_profile: &'a CreateLocalProfileInput,
+    business: &'a CreateBusinessInput,
+    assets: &'a [CreateBusinessAssetInput],
+    clients: &'a [CreateClientInput],
+    quotations: &'a [CreateQuotationInput],
+    invoices: &'a [CreateInvoiceInput],
+    payments: &'a [CreatePaymentInput],
+    activity_logs: &'a [CreateActivityLogInput],
+    settings: &'a [SaveAppSettingInput],
+}
 
-    let _ = require_non_empty_id(&input.local_profile.id, "localProfile.id")?;
+fn validate_workspace_snapshot(ws: &WorkspaceSnapshotRef<'_>) -> Result<(), DbError> {
+    let _ = require_non_empty_id(&ws.local_profile.id, "localProfile.id")?;
     let _ = validate_optional_non_empty(
-        &input.local_profile.supabase_user_id,
+        &ws.local_profile.supabase_user_id,
         "localProfile.supabaseUserId",
     )?;
-    if let Some(ref ts) = input.local_profile.created_at {
+    if let Some(ref ts) = ws.local_profile.created_at {
         let _ = require_trimmed_non_empty(ts, "localProfile.createdAt")?;
     }
-    if let Some(ref ts) = input.local_profile.updated_at {
+    if let Some(ref ts) = ws.local_profile.updated_at {
         let _ = require_trimmed_non_empty(ts, "localProfile.updatedAt")?;
     }
 
-    let business_id = require_non_empty_id(&input.business.id, "business.id")?;
-    let _ = validate_optional_non_empty(&input.business.legacy_id, "business.legacyId")?;
-    let _ = validate_optional_non_empty(&input.business.owner_profile_id, "business.ownerProfileId")?;
-    let _ = require_trimmed_non_empty(&input.business.name, "business.name")?;
-    let _ = validate_optional_non_empty(&input.business.logo_asset_id, "business.logoAssetId")?;
-    let _ = require_trimmed_non_empty(&input.business.default_currency, "business.defaultCurrency")?;
-    let _ = require_trimmed_non_empty(&input.business.currency_symbol, "business.currencySymbol")?;
-    let _ = require_trimmed_non_empty(&input.business.default_tax_name, "business.defaultTaxName")?;
-    let _ = require_trimmed_non_empty(&input.business.quote_prefix, "business.quotePrefix")?;
-    let _ = require_trimmed_non_empty(&input.business.invoice_prefix, "business.invoicePrefix")?;
-    require_positive(input.business.next_quote_number.get(), "business.nextQuoteNumber")?;
+    let business_id = require_non_empty_id(&ws.business.id, "business.id")?;
+    let _ = validate_optional_non_empty(&ws.business.legacy_id, "business.legacyId")?;
+    let _ = validate_optional_non_empty(&ws.business.owner_profile_id, "business.ownerProfileId")?;
+    let _ = require_trimmed_non_empty(&ws.business.name, "business.name")?;
+    let _ = validate_optional_non_empty(&ws.business.logo_asset_id, "business.logoAssetId")?;
+    let _ = require_trimmed_non_empty(&ws.business.default_currency, "business.defaultCurrency")?;
+    let _ = require_trimmed_non_empty(&ws.business.currency_symbol, "business.currencySymbol")?;
+    let _ = require_trimmed_non_empty(&ws.business.default_tax_name, "business.defaultTaxName")?;
+    let _ = require_trimmed_non_empty(&ws.business.quote_prefix, "business.quotePrefix")?;
+    let _ = require_trimmed_non_empty(&ws.business.invoice_prefix, "business.invoicePrefix")?;
+    require_positive(ws.business.next_quote_number.get(), "business.nextQuoteNumber")?;
     require_positive(
-        input.business.next_invoice_number.get(),
+        ws.business.next_invoice_number.get(),
         "business.nextInvoiceNumber",
     )?;
 
-    let mut asset_ids = HashSet::with_capacity(input.assets.len());
-    let mut asset_hashes = HashSet::with_capacity(input.assets.len());
-    for asset in &input.assets {
+    let mut asset_ids = HashSet::with_capacity(ws.assets.len());
+    let mut asset_hashes = HashSet::with_capacity(ws.assets.len());
+    for asset in ws.assets {
         let aid = require_non_empty_id(&asset.id, "assets.id")?.to_string();
         if !asset_ids.insert(aid) {
             return Err(DbError::DuplicateId("Duplicate business asset ID".to_string()));
@@ -674,19 +924,19 @@ fn validate_migration_payload(input: &LegacyWorkspaceMigrationInput) -> Result<(
         }
     }
 
-    if let Some(ref logo_id) = input.business.logo_asset_id {
+    if let Some(ref logo_id) = ws.business.logo_asset_id {
         if !asset_ids.contains(logo_id.trim()) {
             return Err(DbError::ForeignKeyViolation(
-                "Business logoAssetId does not exist in migration assets".to_string(),
+                "Business logoAssetId does not exist in workspace assets".to_string(),
             ));
         }
     }
 
-    let mut client_ids = HashSet::with_capacity(input.clients.len());
-    for client in &input.clients {
+    let mut client_ids = HashSet::with_capacity(ws.clients.len());
+    for client in ws.clients {
         let cid = require_non_empty_id(&client.id, "clients.id")?.to_string();
         if !client_ids.insert(cid) {
-            return Err(DbError::DuplicateId("Duplicate client ID in migration payload".to_string()));
+            return Err(DbError::DuplicateId("Duplicate client ID in workspace payload".to_string()));
         }
         if require_non_empty_id(&client.business_id, "clients.businessId")? != business_id {
             return Err(DbError::ForeignKeyViolation(
@@ -697,14 +947,14 @@ fn validate_migration_payload(input: &LegacyWorkspaceMigrationInput) -> Result<(
         let _ = require_trimmed_non_empty(&client.name, "clients.name")?;
     }
 
-    let mut quote_ids = HashSet::with_capacity(input.quotations.len());
-    let mut quote_numbers = HashSet::with_capacity(input.quotations.len());
+    let mut quote_ids = HashSet::with_capacity(ws.quotations.len());
+    let mut quote_numbers = HashSet::with_capacity(ws.quotations.len());
     let mut quote_item_ids = HashSet::new();
-    for q in &input.quotations {
+    for q in ws.quotations {
         let qid = require_non_empty_id(&q.id, "quotations.id")?.to_string();
         if !quote_ids.insert(qid) {
             return Err(DbError::DuplicateId(
-                "Duplicate quotation ID in migration payload".to_string(),
+                "Duplicate quotation ID in workspace payload".to_string(),
             ));
         }
         if require_non_empty_id(&q.business_id, "quotations.businessId")? != business_id {
@@ -716,14 +966,14 @@ fn validate_migration_payload(input: &LegacyWorkspaceMigrationInput) -> Result<(
         if let Some(ref cid) = validate_optional_non_empty(&q.client_id, "quotations.clientId")? {
             if !client_ids.contains(cid) {
                 return Err(DbError::ForeignKeyViolation(
-                    "Quotation clientId does not exist in migration clients".to_string(),
+                    "Quotation clientId does not exist in workspace clients".to_string(),
                 ));
             }
         }
         let qnum = require_trimmed_non_empty(&q.quotation_number, "quotations.quotationNumber")?;
         if !quote_numbers.insert(qnum.to_lowercase()) {
             return Err(DbError::DuplicateDocumentNumber(format!(
-                "Duplicate quotation number '{qnum}' in migration payload"
+                "Duplicate quotation number '{qnum}' in workspace payload"
             )));
         }
         validate_json_text(&q.client_snapshot_json, "quotations.clientSnapshotJson")?;
@@ -740,14 +990,14 @@ fn validate_migration_payload(input: &LegacyWorkspaceMigrationInput) -> Result<(
         validate_line_items_for_migration(&q.items, &mut quote_item_ids)?;
     }
 
-    let mut invoice_ids = HashSet::with_capacity(input.invoices.len());
-    let mut invoice_numbers = HashSet::with_capacity(input.invoices.len());
+    let mut invoice_ids = HashSet::with_capacity(ws.invoices.len());
+    let mut invoice_numbers = HashSet::with_capacity(ws.invoices.len());
     let mut invoice_item_ids = HashSet::new();
-    for inv in &input.invoices {
+    for inv in ws.invoices {
         let iid = require_non_empty_id(&inv.id, "invoices.id")?.to_string();
         if !invoice_ids.insert(iid) {
             return Err(DbError::DuplicateId(
-                "Duplicate invoice ID in migration payload".to_string(),
+                "Duplicate invoice ID in workspace payload".to_string(),
             ));
         }
         if require_non_empty_id(&inv.business_id, "invoices.businessId")? != business_id {
@@ -759,7 +1009,7 @@ fn validate_migration_payload(input: &LegacyWorkspaceMigrationInput) -> Result<(
         if let Some(ref cid) = validate_optional_non_empty(&inv.client_id, "invoices.clientId")? {
             if !client_ids.contains(cid) {
                 return Err(DbError::ForeignKeyViolation(
-                    "Invoice clientId does not exist in migration clients".to_string(),
+                    "Invoice clientId does not exist in workspace clients".to_string(),
                 ));
             }
         }
@@ -768,14 +1018,14 @@ fn validate_migration_payload(input: &LegacyWorkspaceMigrationInput) -> Result<(
         {
             if !quote_ids.contains(qid) {
                 return Err(DbError::ForeignKeyViolation(
-                    "Invoice quotationId does not exist in migration quotations".to_string(),
+                    "Invoice quotationId does not exist in workspace quotations".to_string(),
                 ));
             }
         }
         let inum = require_trimmed_non_empty(&inv.invoice_number, "invoices.invoiceNumber")?;
         if !invoice_numbers.insert(inum.to_lowercase()) {
             return Err(DbError::DuplicateDocumentNumber(format!(
-                "Duplicate invoice number '{inum}' in migration payload"
+                "Duplicate invoice number '{inum}' in workspace payload"
             )));
         }
         validate_json_text(&inv.client_snapshot_json, "invoices.clientSnapshotJson")?;
@@ -790,13 +1040,13 @@ fn validate_migration_payload(input: &LegacyWorkspaceMigrationInput) -> Result<(
     }
 
     let mut claimed_converted_invoices = HashSet::new();
-    for q in &input.quotations {
+    for q in ws.quotations {
         if let Some(ref conv_id) =
             validate_optional_non_empty(&q.converted_invoice_id, "quotations.convertedInvoiceId")?
         {
             if !invoice_ids.contains(conv_id) {
                 return Err(DbError::ForeignKeyViolation(
-                    "Quotation convertedInvoiceId does not exist in migration invoices".to_string(),
+                    "Quotation convertedInvoiceId does not exist in workspace invoices".to_string(),
                 ));
             }
             if !claimed_converted_invoices.insert(conv_id.clone()) {
@@ -807,12 +1057,12 @@ fn validate_migration_payload(input: &LegacyWorkspaceMigrationInput) -> Result<(
         }
     }
 
-    let mut payment_ids = HashSet::with_capacity(input.payments.len());
-    for pay in &input.payments {
+    let mut payment_ids = HashSet::with_capacity(ws.payments.len());
+    for pay in ws.payments {
         let pid = require_non_empty_id(&pay.id, "payments.id")?.to_string();
         if !payment_ids.insert(pid) {
             return Err(DbError::DuplicateId(
-                "Duplicate payment ID in migration payload".to_string(),
+                "Duplicate payment ID in workspace payload".to_string(),
             ));
         }
         if require_non_empty_id(&pay.business_id, "payments.businessId")? != business_id {
@@ -823,7 +1073,7 @@ fn validate_migration_payload(input: &LegacyWorkspaceMigrationInput) -> Result<(
         let iid = require_non_empty_id(&pay.invoice_id, "payments.invoiceId")?;
         if !invoice_ids.contains(iid) {
             return Err(DbError::ForeignKeyViolation(
-                "Payment invoiceId does not exist in migration invoices".to_string(),
+                "Payment invoiceId does not exist in workspace invoices".to_string(),
             ));
         }
         let _ = validate_optional_non_empty(&pay.legacy_id, "payments.legacyId")?;
@@ -831,12 +1081,12 @@ fn validate_migration_payload(input: &LegacyWorkspaceMigrationInput) -> Result<(
         validate_enum(&pay.payment_method, &PAYMENT_METHODS, "payments.paymentMethod")?;
     }
 
-    let mut activity_ids = HashSet::with_capacity(input.activity_logs.len());
-    for act in &input.activity_logs {
+    let mut activity_ids = HashSet::with_capacity(ws.activity_logs.len());
+    for act in ws.activity_logs {
         let aid = require_non_empty_id(&act.id, "activityLogs.id")?.to_string();
         if !activity_ids.insert(aid) {
             return Err(DbError::DuplicateId(
-                "Duplicate activity log ID in migration payload".to_string(),
+                "Duplicate activity log ID in workspace payload".to_string(),
             ));
         }
         if require_non_empty_id(&act.business_id, "activityLogs.businessId")? != business_id {
@@ -850,15 +1100,15 @@ fn validate_migration_payload(input: &LegacyWorkspaceMigrationInput) -> Result<(
         if let Some(ref actor_id) =
             validate_optional_non_empty(&act.actor_local_profile_id, "activityLogs.actorLocalProfileId")?
         {
-            if actor_id != input.local_profile.id.trim() {
+            if actor_id != ws.local_profile.id.trim() {
                 return Err(DbError::ForeignKeyViolation(
-                    "Activity log actorLocalProfileId does not match migration profile".to_string(),
+                    "Activity log actorLocalProfileId does not match workspace profile".to_string(),
                 ));
             }
         }
     }
 
-    for setting in &input.settings {
+    for setting in ws.settings {
         let key = require_trimmed_non_empty(&setting.key, "settings.key")?;
         if key == MIGRATION_SETTING_KEY || key == MIGRATION_ERROR_SETTING_KEY {
             return Err(DbError::InvalidInput {
@@ -869,6 +1119,89 @@ fn validate_migration_payload(input: &LegacyWorkspaceMigrationInput) -> Result<(
         }
         validate_json_text(&setting.value_json, "settings.valueJson")?;
     }
+
+    Ok(())
+}
+
+fn validate_migration_payload(input: &LegacyWorkspaceMigrationInput) -> Result<(), DbError> {
+    if let Some(err_diag) = input.diagnostics.iter().find(|d| d.severity == "error") {
+        return Err(DbError::InvalidInput {
+            field: err_diag.field.clone(),
+            message: format!(
+                "Migration payload contains unresolved error diagnostic {}: {}",
+                err_diag.code, err_diag.message
+            ),
+        });
+    }
+
+    let ws = WorkspaceSnapshotRef {
+        local_profile: &input.local_profile,
+        business: &input.business,
+        assets: &input.assets,
+        clients: &input.clients,
+        quotations: &input.quotations,
+        invoices: &input.invoices,
+        payments: &input.payments,
+        activity_logs: &input.activity_logs,
+        settings: &input.settings,
+    };
+    validate_workspace_snapshot(&ws)
+}
+
+fn verify_foreign_keys_in_tx(conn: &Connection, context: &str) -> Result<(), DbError> {
+    let mut fk_stmt = conn
+        .prepare("PRAGMA foreign_key_check;")
+        .map_err(|err| DbError::Integrity(format!("Failed to prepare foreign_key_check: {err}")))?;
+    let fk_violations = fk_stmt
+        .query_map([], |row| {
+            let table: String = row.get(0)?;
+            let rowid: i64 = row.get(1)?;
+            let parent: String = row.get(2)?;
+            Ok(format!("table='{table}' rowid={rowid} parent='{parent}'"))
+        })
+        .map_err(|err| DbError::Integrity(format!("Failed to execute foreign_key_check: {err}")))?
+        .collect::<Result<Vec<String>, _>>()
+        .map_err(|err| DbError::Integrity(format!("Failed to read foreign_key_check: {err}")))?;
+
+    if !fk_violations.is_empty() {
+        return Err(DbError::Integrity(format!(
+            "{context} foreign_key_check failed: {}",
+            fk_violations.join("; ")
+        )));
+    }
+    Ok(())
+}
+
+fn clear_business_tables_in_tx(conn: &Connection) -> Result<(), DbError> {
+    // Break all deferred / circular foreign keys cleanly before leaf-to-root deletion.
+    conn.execute("UPDATE businesses SET logo_asset_id = NULL;", [])
+        .map_err(|err| map_rusqlite_error(err, "clearing business logo links"))?;
+    conn.execute(
+        "UPDATE quotations SET converted_invoice_id = NULL, client_id = NULL;",
+        [],
+    )
+    .map_err(|err| map_rusqlite_error(err, "clearing quotation links"))?;
+    conn.execute("UPDATE invoices SET quotation_id = NULL, client_id = NULL;", [])
+        .map_err(|err| map_rusqlite_error(err, "clearing invoice links"))?;
+
+    conn.execute("DELETE FROM activity_logs;", [])
+        .map_err(|err| map_rusqlite_error(err, "clearing activity logs"))?;
+    conn.execute("DELETE FROM payments;", [])
+        .map_err(|err| map_rusqlite_error(err, "clearing payments"))?;
+    conn.execute("DELETE FROM invoice_items;", [])
+        .map_err(|err| map_rusqlite_error(err, "clearing invoice items"))?;
+    conn.execute("DELETE FROM quotation_items;", [])
+        .map_err(|err| map_rusqlite_error(err, "clearing quotation items"))?;
+    conn.execute("DELETE FROM invoices;", [])
+        .map_err(|err| map_rusqlite_error(err, "clearing invoices"))?;
+    conn.execute("DELETE FROM quotations;", [])
+        .map_err(|err| map_rusqlite_error(err, "clearing quotations"))?;
+    conn.execute("DELETE FROM clients;", [])
+        .map_err(|err| map_rusqlite_error(err, "clearing clients"))?;
+    conn.execute("DELETE FROM business_assets;", [])
+        .map_err(|err| map_rusqlite_error(err, "clearing business assets"))?;
+    conn.execute("DELETE FROM businesses;", [])
+        .map_err(|err| map_rusqlite_error(err, "clearing businesses"))?;
 
     Ok(())
 }
@@ -1484,27 +1817,7 @@ pub fn migrate_legacy_workspace(
     }
 
     // 12. Verify foreign keys inside the transaction before writing completion marker
-    let mut fk_stmt = tx
-        .prepare("PRAGMA foreign_key_check;")
-        .map_err(|err| DbError::Integrity(format!("Failed to prepare foreign_key_check: {err}")))?;
-    let fk_violations = fk_stmt
-        .query_map([], |row| {
-            let table: String = row.get(0)?;
-            let rowid: i64 = row.get(1)?;
-            let parent: String = row.get(2)?;
-            Ok(format!("table='{table}' rowid={rowid} parent='{parent}'"))
-        })
-        .map_err(|err| DbError::Integrity(format!("Failed to execute foreign_key_check: {err}")))?
-        .collect::<Result<Vec<String>, _>>()
-        .map_err(|err| DbError::Integrity(format!("Failed to read foreign_key_check: {err}")))?;
-    drop(fk_stmt);
-
-    if !fk_violations.is_empty() {
-        return Err(DbError::Integrity(format!(
-            "Migration foreign_key_check failed: {}",
-            fk_violations.join("; ")
-        )));
-    }
+    verify_foreign_keys_in_tx(&tx, "Migration")?;
 
     // 13. Write migration completion marker atomically within the exact same transaction
     let sanitized_diagnostics: Vec<MigrationDiagnosticDto> = input
@@ -1558,14 +1871,762 @@ pub fn migrate_legacy_workspace(
     })
 }
 
+fn insert_workspace_snapshot_in_tx(
+    tx: &Connection,
+    ws: &WorkspaceSnapshotRef<'_>,
+    now_utc: &str,
+) -> Result<(String, String, MigrationCountsDto), DbError> {
+    let profile_created_at = ws
+        .local_profile
+        .created_at
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(now_utc)
+        .to_string();
+    let profile_updated_at = ws
+        .local_profile
+        .updated_at
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&profile_created_at)
+        .to_string();
+
+    let biz_created_at = ws
+        .business
+        .created_at
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(now_utc)
+        .to_string();
+    let biz_updated_at = ws
+        .business
+        .updated_at
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&biz_created_at)
+        .to_string();
+
+    // 1. Upsert local profile
+    let profile_id = ws.local_profile.id.trim().to_string();
+    let supabase_user_id = validate_optional_non_empty(
+        &ws.local_profile.supabase_user_id,
+        "localProfile.supabaseUserId",
+    )?;
+    tx.execute(
+        "INSERT INTO local_profiles (id, display_name, email, supabase_user_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(id) DO UPDATE SET
+            display_name = excluded.display_name,
+            email = excluded.email,
+            supabase_user_id = excluded.supabase_user_id,
+            updated_at = excluded.updated_at;",
+        params![
+            profile_id,
+            ws.local_profile.display_name.trim(),
+            ws.local_profile.email.trim(),
+            supabase_user_id,
+            profile_created_at,
+            profile_updated_at
+        ],
+    )
+    .map_err(|err| map_rusqlite_error(err, "upserting workspace local profile"))?;
+
+    // 2. Insert business initially with logo_asset_id = NULL
+    let business_id = ws.business.id.trim().to_string();
+    let business_legacy_id = validate_optional_non_empty(&ws.business.legacy_id, "business.legacyId")?;
+    let owner_profile_id =
+        validate_optional_non_empty(&ws.business.owner_profile_id, "business.ownerProfileId")?
+            .or_else(|| Some(profile_id.clone()));
+
+    tx.execute(
+        "INSERT INTO businesses (
+            id, legacy_id, owner_profile_id, name, tagline,
+            logo_asset_id, logo_url_fallback, email, phone, address,
+            city, country, postal_code, website, tax_number,
+            registration_number, default_currency, currency_symbol,
+            default_tax_name, default_tax_rate_ppm, is_tax_enabled,
+            quote_prefix, invoice_prefix, next_quote_number, next_invoice_number,
+            default_terms_quotation, default_terms_invoice, default_notes,
+            bank_name, account_name, account_number, branch_code,
+            account_type, swift_code, created_at, updated_at
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5,
+            NULL, ?6, ?7, ?8, ?9,
+            ?10, ?11, ?12, ?13, ?14,
+            ?15, ?16, ?17,
+            ?18, ?19, ?20,
+            ?21, ?22, ?23, ?24,
+            ?25, ?26, ?27,
+            ?28, ?29, ?30, ?31,
+            ?32, ?33, ?34, ?35
+        );",
+        params![
+            business_id,
+            business_legacy_id,
+            owner_profile_id,
+            ws.business.name.trim(),
+            ws.business.tagline,
+            ws.business.logo_url_fallback,
+            ws.business.email,
+            ws.business.phone,
+            ws.business.address,
+            ws.business.city,
+            ws.business.country,
+            ws.business.postal_code,
+            ws.business.website,
+            ws.business.tax_number,
+            ws.business.registration_number,
+            ws.business.default_currency.trim(),
+            ws.business.currency_symbol.trim(),
+            ws.business.default_tax_name.trim(),
+            ws.business.default_tax_rate_ppm.get(),
+            if ws.business.is_tax_enabled { 1_i64 } else { 0_i64 },
+            ws.business.quote_prefix.trim(),
+            ws.business.invoice_prefix.trim(),
+            ws.business.next_quote_number.get(),
+            ws.business.next_invoice_number.get(),
+            ws.business.default_terms_quotation,
+            ws.business.default_terms_invoice,
+            ws.business.default_notes,
+            ws.business.bank_name,
+            ws.business.account_name,
+            ws.business.account_number,
+            ws.business.branch_code,
+            ws.business.account_type,
+            ws.business.swift_code,
+            biz_created_at,
+            biz_updated_at
+        ],
+    )
+    .map_err(|err| map_rusqlite_error(err, "inserting workspace business"))?;
+
+    // 3. Insert business_assets & attach business.logo_asset_id
+    for asset in ws.assets {
+        let asset_created = asset
+            .created_at
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&biz_created_at);
+        tx.execute(
+            "INSERT INTO business_assets (
+                id, business_id, content_hash, source_type, mime_type,
+                inline_data, file_path, external_url, original_filename, byte_size, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);",
+            params![
+                asset.id.trim(),
+                business_id,
+                asset.content_hash.trim(),
+                asset.source_type,
+                validate_optional_non_empty(&asset.mime_type, "assets.mimeType")?,
+                validate_optional_non_empty(&asset.inline_data, "assets.inlineData")?,
+                validate_optional_non_empty(&asset.file_path, "assets.filePath")?,
+                validate_optional_non_empty(&asset.external_url, "assets.externalUrl")?,
+                validate_optional_non_empty(&asset.original_filename, "assets.originalFilename")?,
+                asset.byte_size.map(SafeI64::get),
+                asset_created
+            ],
+        )
+        .map_err(|err| map_rusqlite_error(err, "inserting workspace business asset"))?;
+    }
+
+    if let Some(logo_asset_id) =
+        validate_optional_non_empty(&ws.business.logo_asset_id, "business.logoAssetId")?
+    {
+        tx.execute(
+            "UPDATE businesses SET logo_asset_id = ?1 WHERE id = ?2;",
+            params![logo_asset_id, business_id],
+        )
+        .map_err(|err| map_rusqlite_error(err, "attaching workspace business logo asset"))?;
+    }
+
+    // 4. Insert clients
+    for client in ws.clients {
+        let c_created = client
+            .created_at
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(now_utc);
+        let c_updated = client
+            .updated_at
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(c_created);
+        tx.execute(
+            "INSERT INTO clients (
+                id, business_id, legacy_id, name, company_name,
+                email, phone, address, city, country,
+                vat_number, notes, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14);",
+            params![
+                client.id.trim(),
+                business_id,
+                validate_optional_non_empty(&client.legacy_id, "clients.legacyId")?,
+                client.name.trim(),
+                client.company_name,
+                client.email,
+                client.phone,
+                client.address,
+                client.city,
+                client.country,
+                client.vat_number,
+                client.notes,
+                c_created,
+                c_updated
+            ],
+        )
+        .map_err(|err| map_rusqlite_error(err, "inserting workspace client"))?;
+    }
+
+    // 5. Insert quotations (initially with converted_invoice_id = NULL) & quotation_items
+    let mut expected_quote_item_count: i64 = 0;
+    for q in ws.quotations {
+        let q_created = q
+            .created_at
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(now_utc);
+        let q_updated = q
+            .updated_at
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(q_created);
+        let (disc_pct, disc_fixed) = if q.discount_type == "percentage" {
+            (q.discount_percentage_ppm.get(), 0_i64)
+        } else {
+            (0_i64, q.discount_fixed_minor.get())
+        };
+
+        tx.execute(
+            "INSERT INTO quotations (
+                id, business_id, legacy_id, client_id, quotation_number,
+                client_snapshot_json, business_snapshot_json, issue_date, expiry_date,
+                currency, currency_symbol, subtotal_minor, discount_type,
+                discount_percentage_ppm, discount_fixed_minor, discount_amount_minor,
+                tax_name, tax_rate_ppm, tax_amount_minor, grand_total_minor,
+                status, pre_conversion_status, notes, terms, converted_invoice_id,
+                created_at, updated_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5,
+                ?6, ?7, ?8, ?9,
+                ?10, ?11, ?12, ?13,
+                ?14, ?15, ?16,
+                ?17, ?18, ?19, ?20,
+                ?21, ?22, ?23, ?24, NULL,
+                ?25, ?26
+            );",
+            params![
+                q.id.trim(),
+                business_id,
+                validate_optional_non_empty(&q.legacy_id, "quotations.legacyId")?,
+                validate_optional_non_empty(&q.client_id, "quotations.clientId")?,
+                q.quotation_number.trim(),
+                q.client_snapshot_json,
+                q.business_snapshot_json,
+                q.issue_date.trim(),
+                validate_optional_iso_date(&q.expiry_date, "quotations.expiryDate")?,
+                q.currency.trim(),
+                q.currency_symbol.trim(),
+                q.subtotal_minor.get(),
+                q.discount_type,
+                disc_pct,
+                disc_fixed,
+                q.discount_amount_minor.get(),
+                q.tax_name.trim(),
+                q.tax_rate_ppm.get(),
+                q.tax_amount_minor.get(),
+                q.grand_total_minor.get(),
+                q.status,
+                validate_optional_non_empty(&q.pre_conversion_status, "quotations.preConversionStatus")?,
+                q.notes,
+                q.terms,
+                q_created,
+                q_updated
+            ],
+        )
+        .map_err(|err| map_rusqlite_error(err, "inserting workspace quotation"))?;
+
+        for (idx, item) in q.items.iter().enumerate() {
+            let item_created = item
+                .created_at
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(q_created);
+            let sort_order = item.sort_order.map(SafeI64::get).unwrap_or(idx as i64);
+            tx.execute(
+                "INSERT INTO quotation_items (
+                    id, business_id, quotation_id, legacy_id, sort_order,
+                    description, quantity_scaled, unit_price_scaled, total_minor, created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);",
+                params![
+                    item.id.trim(),
+                    business_id,
+                    q.id.trim(),
+                    validate_optional_non_empty(&item.legacy_id, "quotationItems.legacyId")?,
+                    sort_order,
+                    item.description,
+                    item.quantity_scaled.get(),
+                    item.unit_price_scaled.get(),
+                    item.total_minor.get(),
+                    item_created
+                ],
+            )
+            .map_err(|err| map_rusqlite_error(err, "inserting workspace quotation item"))?;
+            expected_quote_item_count += 1;
+        }
+    }
+
+    // 6. Insert invoices & invoice_items
+    let mut expected_invoice_item_count: i64 = 0;
+    for inv in ws.invoices {
+        let inv_created = inv
+            .created_at
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(now_utc);
+        let inv_updated = inv
+            .updated_at
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(inv_created);
+        let (disc_pct, disc_fixed) = if inv.discount_type == "percentage" {
+            (inv.discount_percentage_ppm.get(), 0_i64)
+        } else {
+            (0_i64, inv.discount_fixed_minor.get())
+        };
+
+        tx.execute(
+            "INSERT INTO invoices (
+                id, business_id, legacy_id, client_id, quotation_id, invoice_number,
+                client_snapshot_json, business_snapshot_json, issue_date, due_date,
+                currency, currency_symbol, subtotal_minor, discount_type,
+                discount_percentage_ppm, discount_fixed_minor, discount_amount_minor,
+                tax_name, tax_rate_ppm, tax_amount_minor, grand_total_minor,
+                amount_paid_minor, outstanding_balance_minor, status,
+                notes, terms, payment_instructions, created_at, updated_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6,
+                ?7, ?8, ?9, ?10,
+                ?11, ?12, ?13, ?14,
+                ?15, ?16, ?17,
+                ?18, ?19, ?20, ?21,
+                ?22, ?23, ?24,
+                ?25, ?26, ?27, ?28, ?29
+            );",
+            params![
+                inv.id.trim(),
+                business_id,
+                validate_optional_non_empty(&inv.legacy_id, "invoices.legacyId")?,
+                validate_optional_non_empty(&inv.client_id, "invoices.clientId")?,
+                validate_optional_non_empty(&inv.quotation_id, "invoices.quotationId")?,
+                inv.invoice_number.trim(),
+                inv.client_snapshot_json,
+                inv.business_snapshot_json,
+                inv.issue_date.trim(),
+                validate_optional_iso_date(&inv.due_date, "invoices.dueDate")?,
+                inv.currency.trim(),
+                inv.currency_symbol.trim(),
+                inv.subtotal_minor.get(),
+                inv.discount_type,
+                disc_pct,
+                disc_fixed,
+                inv.discount_amount_minor.get(),
+                inv.tax_name.trim(),
+                inv.tax_rate_ppm.get(),
+                inv.tax_amount_minor.get(),
+                inv.grand_total_minor.get(),
+                inv.amount_paid_minor.get(),
+                inv.outstanding_balance_minor.get(),
+                inv.status,
+                inv.notes,
+                inv.terms,
+                inv.payment_instructions,
+                inv_created,
+                inv_updated
+            ],
+        )
+        .map_err(|err| map_rusqlite_error(err, "inserting workspace invoice"))?;
+
+        for (idx, item) in inv.items.iter().enumerate() {
+            let item_created = item
+                .created_at
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(inv_created);
+            let sort_order = item.sort_order.map(SafeI64::get).unwrap_or(idx as i64);
+            tx.execute(
+                "INSERT INTO invoice_items (
+                    id, business_id, invoice_id, legacy_id, sort_order,
+                    description, quantity_scaled, unit_price_scaled, total_minor, created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);",
+                params![
+                    item.id.trim(),
+                    business_id,
+                    inv.id.trim(),
+                    validate_optional_non_empty(&item.legacy_id, "invoiceItems.legacyId")?,
+                    sort_order,
+                    item.description,
+                    item.quantity_scaled.get(),
+                    item.unit_price_scaled.get(),
+                    item.total_minor.get(),
+                    item_created
+                ],
+            )
+            .map_err(|err| map_rusqlite_error(err, "inserting workspace invoice item"))?;
+            expected_invoice_item_count += 1;
+        }
+    }
+
+    // 7. Attach canonical quotation.converted_invoice_id links
+    for q in ws.quotations {
+        if let Some(conv_inv_id) =
+            validate_optional_non_empty(&q.converted_invoice_id, "quotations.convertedInvoiceId")?
+        {
+            tx.execute(
+                "UPDATE quotations SET converted_invoice_id = ?1 WHERE business_id = ?2 AND id = ?3;",
+                params![conv_inv_id, business_id, q.id.trim()],
+            )
+            .map_err(|err| map_rusqlite_error(err, "linking workspace quotation convertedInvoiceId"))?;
+        }
+    }
+
+    // 8. Insert payments verbatim
+    for pay in ws.payments {
+        let recorded_at = pay
+            .recorded_at
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(now_utc);
+        tx.execute(
+            "INSERT INTO payments (
+                id, business_id, invoice_id, legacy_id, amount_minor,
+                payment_date, payment_method, reference, notes, recorded_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);",
+            params![
+                pay.id.trim(),
+                business_id,
+                pay.invoice_id.trim(),
+                validate_optional_non_empty(&pay.legacy_id, "payments.legacyId")?,
+                pay.amount_minor.get(),
+                pay.payment_date.trim(),
+                pay.payment_method,
+                pay.reference,
+                pay.notes,
+                recorded_at
+            ],
+        )
+        .map_err(|err| map_rusqlite_error(err, "inserting workspace payment"))?;
+    }
+
+    // 9. Insert activity_logs
+    for act in ws.activity_logs {
+        let timestamp = act
+            .timestamp
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(now_utc);
+        tx.execute(
+            "INSERT INTO activity_logs (
+                id, business_id, legacy_id, type, title, description,
+                timestamp, reference_id, reference_type, actor_local_profile_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);",
+            params![
+                act.id.trim(),
+                business_id,
+                validate_optional_non_empty(&act.legacy_id, "activityLogs.legacyId")?,
+                act.log_type,
+                act.title.trim(),
+                act.description,
+                timestamp,
+                validate_optional_non_empty(&act.reference_id, "activityLogs.referenceId")?,
+                validate_optional_non_empty(&act.reference_type, "activityLogs.referenceType")?,
+                validate_optional_non_empty(
+                    &act.actor_local_profile_id,
+                    "activityLogs.actorLocalProfileId",
+                )?
+            ],
+        )
+        .map_err(|err| map_rusqlite_error(err, "inserting workspace activity log"))?;
+    }
+
+    // 10. Upsert optional non-migration settings
+    for setting in ws.settings {
+        let s_updated = setting
+            .updated_at
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(now_utc);
+        tx.execute(
+            "INSERT INTO app_settings (key, value_json, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET
+                value_json = excluded.value_json,
+                updated_at = excluded.updated_at;",
+            params![setting.key.trim(), setting.value_json, s_updated],
+        )
+        .map_err(|err| map_rusqlite_error(err, "inserting workspace app setting"))?;
+    }
+
+    // 11. Verify exact inserted counts & foreign keys
+    let actual_counts = collect_counts(tx)?;
+    let expected_business_assets = i64::try_from(ws.assets.len()).unwrap_or(i64::MAX);
+    let expected_clients = i64::try_from(ws.clients.len()).unwrap_or(i64::MAX);
+    let expected_quotations = i64::try_from(ws.quotations.len()).unwrap_or(i64::MAX);
+    let expected_invoices = i64::try_from(ws.invoices.len()).unwrap_or(i64::MAX);
+    let expected_payments = i64::try_from(ws.payments.len()).unwrap_or(i64::MAX);
+    let expected_activities = i64::try_from(ws.activity_logs.len()).unwrap_or(i64::MAX);
+
+    if actual_counts.businesses.get() != 1
+        || actual_counts.business_assets.get() != expected_business_assets
+        || actual_counts.clients.get() != expected_clients
+        || actual_counts.quotations.get() != expected_quotations
+        || actual_counts.quotation_items.get() != expected_quote_item_count
+        || actual_counts.invoices.get() != expected_invoices
+        || actual_counts.invoice_items.get() != expected_invoice_item_count
+        || actual_counts.payments.get() != expected_payments
+        || actual_counts.activity_logs.get() != expected_activities
+    {
+        return Err(DbError::Integrity(
+            "Post-replace row count verification failed inside workspace transaction".to_string(),
+        ));
+    }
+
+    verify_foreign_keys_in_tx(tx, "Workspace replacement")?;
+
+    Ok((business_id, profile_id, actual_counts))
+}
+
+/// Atomically replaces the SQLite desktop workspace in a single `TransactionBehavior::Immediate`
+/// transaction (for fresh desktop initialization, JSON backup import/restore, demo reset, or
+/// starter workspace creation) while enforcing conflict safeguards and preserving valid
+/// `migration.localstorage_v1` markers and backup files on disk.
+pub fn replace_desktop_workspace(
+    conn: &mut Connection,
+    input: &ReplaceDesktopWorkspaceInput,
+) -> Result<WorkspaceLifecycleResultDto, DbError> {
+    let source = normalize_lifecycle_source(input.source.as_deref(), "workspace_replace")?;
+    let ws = WorkspaceSnapshotRef {
+        local_profile: &input.local_profile,
+        business: &input.business,
+        assets: &input.assets,
+        clients: &input.clients,
+        quotations: &input.quotations,
+        invoices: &input.invoices,
+        payments: &input.payments,
+        activity_logs: &input.activity_logs,
+        settings: &input.settings,
+    };
+
+    // Full validation BEFORE opening destructive DB writes.
+    validate_workspace_snapshot(&ws)?;
+
+    let now_utc = current_utc_iso(conn)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|err| DbError::TransactionFailed(format!("Failed to begin transaction: {err}")))?;
+
+    let existing_counts = collect_counts(&tx)?;
+    let has_data = has_existing_business_data(&existing_counts);
+    let raw_marker = read_setting_json(&tx, MIGRATION_SETTING_KEY)?;
+
+    let should_write_not_needed = match raw_marker {
+        Some(ref marker_json) => {
+            let (state, _) = parse_marker_payload(marker_json)?;
+            match state {
+                MigrationState::ConflictExistingData => {
+                    return Err(DbError::UniqueConstraint(
+                        "Cannot replace desktop workspace while existing SQLite data requires migration conflict resolution".to_string(),
+                    ));
+                }
+                MigrationState::Absent => {
+                    return Err(DbError::Integrity(
+                        "Stored migration marker resolved to unexpected absent state".to_string(),
+                    ));
+                }
+                MigrationState::Completed | MigrationState::NotNeeded => false,
+            }
+        }
+        None => {
+            if has_data {
+                return Err(DbError::UniqueConstraint(
+                    "Cannot replace desktop workspace because SQLite already contains existing business data requiring migration conflict resolution".to_string(),
+                ));
+            }
+            true
+        }
+    };
+
+    clear_business_tables_in_tx(&tx)?;
+    let (business_id, profile_id, actual_counts) =
+        insert_workspace_snapshot_in_tx(&tx, &ws, &now_utc)?;
+
+    if should_write_not_needed {
+        let marker_payload = MigrationMarkerPayload {
+            version: MIGRATION_MARKER_VERSION,
+            status: "not_needed".to_string(),
+            source,
+            migrated_business_id: None,
+            local_profile_id: Some(profile_id.clone()),
+            backup_filename: None,
+            counts: Some(actual_counts),
+            diagnostics: Vec::new(),
+            completed_at: Some(now_utc.clone()),
+        };
+
+        let marker_json = serde_json::to_string(&marker_payload).map_err(|_| {
+            DbError::Config("Failed to serialize migration not_needed marker".to_string())
+        })?;
+
+        tx.execute(
+            "INSERT INTO app_settings (key, value_json, updated_at)
+             VALUES (?1, ?2, ?3);",
+            params![MIGRATION_SETTING_KEY, marker_json, now_utc],
+        )
+        .map_err(|err| map_rusqlite_error(err, "saving migration not_needed marker"))?;
+
+        tx.execute(
+            "DELETE FROM app_settings WHERE key = ?1;",
+            params![MIGRATION_ERROR_SETTING_KEY],
+        )
+        .map_err(|err| map_rusqlite_error(err, "clearing prior migration error diagnostic"))?;
+    }
+
+    tx.commit()
+        .map_err(|err| map_rusqlite_error(err, "committing workspace replacement"))?;
+
+    let final_status = get_migration_status(conn)?;
+    Ok(WorkspaceLifecycleResultDto {
+        migration_state: final_status.state,
+        business_id: Some(business_id),
+        local_profile_id: Some(profile_id),
+        counts: final_status.existing_counts,
+        completed_at: now_utc,
+    })
+}
+
+/// Atomically clears all business-scoped tables (`businesses`, `business_assets`, `clients`,
+/// `quotations`, `quotation_items`, `invoices`, `invoice_items`, `payments`, `activity_logs`)
+/// in a single `TransactionBehavior::Immediate` transaction after breaking circular FKs.
+/// Preserves existing `migration.localstorage_v1` markers (or stamps `not_needed` when clearing
+/// an unmarked empty workspace), preserves non-business `app_settings`, preserves backup files
+/// on disk, verifies `PRAGMA foreign_key_check`, and refuses if SQLite has unresolved conflicts.
+pub fn clear_desktop_workspace(
+    conn: &mut Connection,
+    source: Option<&str>,
+) -> Result<WorkspaceLifecycleResultDto, DbError> {
+    let source = normalize_lifecycle_source(source, "clear_workspace")?;
+    let now_utc = current_utc_iso(conn)?;
+
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|err| DbError::TransactionFailed(format!("Failed to begin transaction: {err}")))?;
+
+    let existing_counts = collect_counts(&tx)?;
+    let has_data = has_existing_business_data(&existing_counts);
+    let raw_marker = read_setting_json(&tx, MIGRATION_SETTING_KEY)?;
+
+    let should_write_not_needed = match raw_marker {
+        Some(ref marker_json) => {
+            let (state, _) = parse_marker_payload(marker_json)?;
+            match state {
+                MigrationState::ConflictExistingData => {
+                    return Err(DbError::UniqueConstraint(
+                        "Cannot clear desktop workspace while existing SQLite data requires migration conflict resolution".to_string(),
+                    ));
+                }
+                MigrationState::Absent => {
+                    return Err(DbError::Integrity(
+                        "Stored migration marker resolved to unexpected absent state".to_string(),
+                    ));
+                }
+                MigrationState::Completed | MigrationState::NotNeeded => false,
+            }
+        }
+        None => {
+            if has_data {
+                return Err(DbError::UniqueConstraint(
+                    "Cannot clear desktop workspace because SQLite already contains existing business data requiring migration conflict resolution".to_string(),
+                ));
+            }
+            true
+        }
+    };
+
+    clear_business_tables_in_tx(&tx)?;
+
+    let post_counts = collect_counts(&tx)?;
+    if has_existing_business_data(&post_counts) {
+        return Err(DbError::Integrity(
+            "Post-clear verification found remaining business records inside transaction"
+                .to_string(),
+        ));
+    }
+
+    verify_foreign_keys_in_tx(&tx, "Workspace clear")?;
+
+    if should_write_not_needed {
+        let marker_payload = MigrationMarkerPayload {
+            version: MIGRATION_MARKER_VERSION,
+            status: "not_needed".to_string(),
+            source,
+            migrated_business_id: None,
+            local_profile_id: None,
+            backup_filename: None,
+            counts: Some(post_counts),
+            diagnostics: Vec::new(),
+            completed_at: Some(now_utc.clone()),
+        };
+
+        let marker_json = serde_json::to_string(&marker_payload).map_err(|_| {
+            DbError::Config("Failed to serialize migration not_needed marker".to_string())
+        })?;
+
+        tx.execute(
+            "INSERT INTO app_settings (key, value_json, updated_at)
+             VALUES (?1, ?2, ?3);",
+            params![MIGRATION_SETTING_KEY, marker_json, now_utc],
+        )
+        .map_err(|err| map_rusqlite_error(err, "saving migration not_needed marker"))?;
+
+        tx.execute(
+            "DELETE FROM app_settings WHERE key = ?1;",
+            params![MIGRATION_ERROR_SETTING_KEY],
+        )
+        .map_err(|err| map_rusqlite_error(err, "clearing prior migration error diagnostic"))?;
+    }
+
+    tx.commit()
+        .map_err(|err| map_rusqlite_error(err, "committing workspace clear"))?;
+
+    let final_status = get_migration_status(conn)?;
+    Ok(WorkspaceLifecycleResultDto {
+        migration_state: final_status.state,
+        business_id: None,
+        local_profile_id: None,
+        counts: final_status.existing_counts,
+        completed_at: now_utc,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::dto::{
-        CreateActivityLogInput, CreateBusinessAssetInput, CreateBusinessInput, CreateClientInput,
-        CreateInvoiceInput, CreateLocalProfileInput, CreatePaymentInput, CreateQuotationInput,
-        RawLegacyKeyEntry, SaveAppSettingInput,
-    };
+    use crate::db::dto::RawLegacyKeyEntry;
     use crate::db::DatabaseManager;
     use std::sync::atomic::AtomicU64;
 
@@ -2073,5 +3134,554 @@ mod tests {
             .expect_err("pre-populated DB must reject migration");
         assert!(matches!(err, DbError::UniqueConstraint(_)));
         assert_eq!(query_table_count(&env.conn, "businesses").unwrap(), 1);
+    }
+
+    fn make_replace_workspace_input(source: &str, suffix: &str) -> ReplaceDesktopWorkspaceInput {
+        let profile_id = format!("11111111-1111-4111-8111-0000000000{suffix}");
+        let business_id = format!("22222222-2222-4222-8222-0000000000{suffix}");
+        let asset_id = format!("33333333-3333-4333-8333-0000000000{suffix}");
+        let client_id = format!("44444444-4444-4444-8444-0000000000{suffix}");
+        let quote_id = format!("55555555-5555-4555-8555-0000000000{suffix}");
+        let inv_id = format!("66666666-6666-4666-8666-0000000000{suffix}");
+        let pay_id = format!("88888888-8888-4888-8888-0000000000{suffix}");
+        let act_id = format!("99999999-9999-4999-8999-0000000000{suffix}");
+        let q_item_id = format!("aaaaaaaa-aaaa-4aaa-8aaa-0000000000{suffix}");
+        let i_item_id = format!("bbbbbbbb-bbbb-4bbb-8bbb-0000000000{suffix}");
+
+        let inline_logo = format!("data:image/png;base64,BBBB{suffix}");
+        ReplaceDesktopWorkspaceInput {
+            source: Some(source.to_string()),
+            local_profile: CreateLocalProfileInput {
+                id: profile_id.clone(),
+                display_name: format!("Owner {suffix}"),
+                email: format!("owner{suffix}@example.com"),
+                supabase_user_id: None,
+                created_at: None,
+                updated_at: None,
+            },
+            business: CreateBusinessInput {
+                id: business_id.clone(),
+                legacy_id: Some(format!("biz_{suffix}")),
+                owner_profile_id: Some(profile_id.clone()),
+                name: format!("Namib Studio {suffix}"),
+                tagline: "Modern Services".to_string(),
+                logo_asset_id: Some(asset_id.clone()),
+                logo_url_fallback: "".to_string(),
+                email: format!("hello{suffix}@studio.na"),
+                phone: "+264 61 111 111".to_string(),
+                address: "Windhoek".to_string(),
+                city: "Windhoek".to_string(),
+                country: "Namibia".to_string(),
+                postal_code: Some("9000".to_string()),
+                website: None,
+                tax_number: None,
+                registration_number: None,
+                default_currency: "NAD".to_string(),
+                currency_symbol: "N$".to_string(),
+                default_tax_name: "VAT".to_string(),
+                default_tax_rate_ppm: SafeI64(150_000),
+                is_tax_enabled: true,
+                quote_prefix: "QUO-".to_string(),
+                invoice_prefix: "INV-".to_string(),
+                next_quote_number: SafeI64(2),
+                next_invoice_number: SafeI64(2),
+                default_terms_quotation: "Valid 30 days".to_string(),
+                default_terms_invoice: "Due 14 days".to_string(),
+                default_notes: "Thank you".to_string(),
+                bank_name: "Bank Windhoek".to_string(),
+                account_name: "Namib Studio".to_string(),
+                account_number: "987654321".to_string(),
+                branch_code: "481972".to_string(),
+                account_type: None,
+                swift_code: None,
+                created_at: None,
+                updated_at: None,
+            },
+            assets: vec![CreateBusinessAssetInput {
+                id: asset_id,
+                business_id: business_id.clone(),
+                content_hash: sha256_hex(inline_logo.as_bytes()),
+                source_type: "data_url".to_string(),
+                mime_type: Some("image/png".to_string()),
+                inline_data: Some(inline_logo),
+                file_path: None,
+                external_url: None,
+                original_filename: Some("logo.png".to_string()),
+                byte_size: Some(SafeI64(32)),
+                created_at: None,
+            }],
+            clients: vec![CreateClientInput {
+                id: client_id.clone(),
+                business_id: business_id.clone(),
+                legacy_id: Some(format!("cli_{suffix}")),
+                name: format!("Client {suffix}"),
+                company_name: Some("Dune Holdings".to_string()),
+                email: format!("client{suffix}@example.na"),
+                phone: "123".to_string(),
+                address: "Walvis Bay".to_string(),
+                city: Some("Walvis Bay".to_string()),
+                country: Some("Namibia".to_string()),
+                vat_number: None,
+                notes: None,
+                created_at: None,
+                updated_at: None,
+            }],
+            quotations: vec![CreateQuotationInput {
+                id: quote_id.clone(),
+                business_id: business_id.clone(),
+                legacy_id: Some(format!("quo_{suffix}")),
+                client_id: Some(client_id.clone()),
+                quotation_number: format!("QUO-10{suffix}"),
+                client_snapshot_json: "{\"name\":\"Client\"}".to_string(),
+                business_snapshot_json: "{\"name\":\"Namib Studio\"}".to_string(),
+                issue_date: "2026-11-01".to_string(),
+                expiry_date: Some("2026-12-01".to_string()),
+                currency: "NAD".to_string(),
+                currency_symbol: "N$".to_string(),
+                subtotal_minor: SafeI64(200_00),
+                discount_type: "percentage".to_string(),
+                discount_percentage_ppm: SafeI64(0),
+                discount_fixed_minor: SafeI64(0),
+                discount_amount_minor: SafeI64(0),
+                tax_name: "VAT".to_string(),
+                tax_rate_ppm: SafeI64(150_000),
+                tax_amount_minor: SafeI64(30_00),
+                grand_total_minor: SafeI64(230_00),
+                status: "accepted".to_string(),
+                pre_conversion_status: Some("sent".to_string()),
+                notes: None,
+                terms: None,
+                converted_invoice_id: Some(inv_id.clone()),
+                items: vec![LineItemInput {
+                    id: q_item_id,
+                    legacy_id: Some(format!("qi_{suffix}")),
+                    sort_order: Some(SafeI64(0)),
+                    description: "Retainer".to_string(),
+                    quantity_scaled: SafeI64(2_000_000),
+                    unit_price_scaled: SafeI64(100_000_000),
+                    total_minor: SafeI64(200_00),
+                    created_at: None,
+                }],
+                created_at: None,
+                updated_at: None,
+            }],
+            invoices: vec![CreateInvoiceInput {
+                id: inv_id.clone(),
+                business_id: business_id.clone(),
+                legacy_id: Some(format!("inv_{suffix}")),
+                client_id: Some(client_id),
+                quotation_id: Some(quote_id),
+                invoice_number: format!("INV-10{suffix}"),
+                client_snapshot_json: "{\"name\":\"Client\"}".to_string(),
+                business_snapshot_json: "{\"name\":\"Namib Studio\"}".to_string(),
+                issue_date: "2026-11-02".to_string(),
+                due_date: Some("2026-11-16".to_string()),
+                currency: "NAD".to_string(),
+                currency_symbol: "N$".to_string(),
+                subtotal_minor: SafeI64(200_00),
+                discount_type: "fixed".to_string(),
+                discount_percentage_ppm: SafeI64(0),
+                discount_fixed_minor: SafeI64(0),
+                discount_amount_minor: SafeI64(0),
+                tax_name: "VAT".to_string(),
+                tax_rate_ppm: SafeI64(150_000),
+                tax_amount_minor: SafeI64(30_00),
+                grand_total_minor: SafeI64(230_00),
+                amount_paid_minor: SafeI64(100_00),
+                outstanding_balance_minor: SafeI64(130_00),
+                status: "partially_paid".to_string(),
+                notes: None,
+                terms: None,
+                payment_instructions: None,
+                items: vec![LineItemInput {
+                    id: i_item_id,
+                    legacy_id: Some(format!("ii_{suffix}")),
+                    sort_order: Some(SafeI64(0)),
+                    description: "Retainer".to_string(),
+                    quantity_scaled: SafeI64(2_000_000),
+                    unit_price_scaled: SafeI64(100_000_000),
+                    total_minor: SafeI64(200_00),
+                    created_at: None,
+                }],
+                created_at: None,
+                updated_at: None,
+            }],
+            payments: vec![CreatePaymentInput {
+                id: pay_id,
+                business_id: business_id.clone(),
+                invoice_id: inv_id.clone(),
+                legacy_id: Some(format!("pay_{suffix}")),
+                amount_minor: SafeI64(100_00),
+                payment_date: "2026-11-03".to_string(),
+                payment_method: "eft".to_string(),
+                reference: Some("EFT-100".to_string()),
+                notes: None,
+                recorded_at: None,
+            }],
+            activity_logs: vec![CreateActivityLogInput {
+                id: act_id,
+                business_id,
+                legacy_id: Some(format!("act_{suffix}")),
+                log_type: "invoice_created".to_string(),
+                title: format!("Created INV-10{suffix}"),
+                description: "Workspace entry".to_string(),
+                timestamp: None,
+                reference_id: Some(inv_id),
+                reference_type: Some("invoice".to_string()),
+                actor_local_profile_id: Some(profile_id),
+            }],
+            settings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn mark_migration_not_needed_succeeds_on_empty_db_with_version_timestamp_and_source() {
+        let mut env = TempDbEnv::new("not_needed_empty");
+        assert_eq!(
+            get_migration_status(&env.conn).unwrap().state,
+            MigrationState::Absent
+        );
+
+        let status = mark_migration_not_needed(&mut env.conn, Some("desktop_fresh_install"))
+            .expect("marking empty DB as not_needed must succeed");
+        assert_eq!(status.state, MigrationState::NotNeeded);
+        assert_eq!(status.marker_version, Some(MIGRATION_MARKER_VERSION));
+        assert!(status.completed_at.is_some());
+
+        let raw_marker = read_setting_json(&env.conn, MIGRATION_SETTING_KEY)
+            .unwrap()
+            .expect("marker must be persisted");
+        let parsed: MigrationMarkerPayload = serde_json::from_str(&raw_marker).unwrap();
+        assert_eq!(parsed.version, MIGRATION_MARKER_VERSION);
+        assert_eq!(parsed.status, "not_needed");
+        assert_eq!(parsed.source, "desktop_fresh_install");
+        assert!(parsed.completed_at.is_some());
+
+        // Calling again is idempotent and preserves NotNeeded
+        let again = mark_migration_not_needed(&mut env.conn, Some("desktop_fresh_install"))
+            .expect("idempotent call must succeed");
+        assert_eq!(again.state, MigrationState::NotNeeded);
+        assert_eq!(again.completed_at, status.completed_at);
+    }
+
+    #[test]
+    fn mark_migration_not_needed_refuses_safely_when_sqlite_has_existing_business_data() {
+        let mut env = TempDbEnv::new("not_needed_conflict");
+        env.conn
+            .execute(
+                "INSERT INTO businesses (id, name, created_at, updated_at)
+                 VALUES ('biz_conflict', 'Preexisting Co', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z');",
+                [],
+            )
+            .unwrap();
+
+        let err = mark_migration_not_needed(&mut env.conn, Some("desktop_fresh_install"))
+            .expect_err("must refuse when SQLite has existing business data without marker");
+        assert!(matches!(err, DbError::UniqueConstraint(_)));
+
+        assert!(read_setting_json(&env.conn, MIGRATION_SETTING_KEY)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            get_migration_status(&env.conn).unwrap().state,
+            MigrationState::ConflictExistingData
+        );
+    }
+
+    #[test]
+    fn mark_migration_not_needed_preserves_existing_completed_marker() {
+        let mut env = TempDbEnv::new("not_needed_preserves_completed");
+        let backup = backup_legacy_localstorage(&env.db_path, &make_raw_backup_input()).unwrap();
+        let payload = make_valid_migration_payload(backup);
+        let migrated = migrate_legacy_workspace(&mut env.conn, &env.db_path, &payload).unwrap();
+
+        let err = mark_migration_not_needed(&mut env.conn, Some("desktop_fresh_install"))
+            .expect_err("must never overwrite a completed migration marker");
+        assert!(matches!(err, DbError::UniqueConstraint(_)));
+
+        let status = get_migration_status(&env.conn).unwrap();
+        assert_eq!(status.state, MigrationState::Completed);
+        assert_eq!(
+            status.migrated_business_id.as_deref(),
+            Some(migrated.migrated_business_id.as_str())
+        );
+        assert_eq!(
+            status.backup_filename.as_deref(),
+            Some(migrated.backup_filename.as_str())
+        );
+    }
+
+    #[test]
+    fn record_migration_error_persists_sanitized_diagnostic_and_redacts_sensitive_payloads() {
+        let mut env = TempDbEnv::new("record_err_sanitized");
+
+        let raw_diag = MigrationDiagnosticDto {
+            code: "BACKUP_WRITE_FAILED\n\x1b[31m".to_string(),
+            severity: "ERROR".to_string(),
+            stage: "backup".to_string(),
+            entity_type: "workspace\t".to_string(),
+            record_id: Some("bizora_business_profile_v1".to_string()),
+            field: Some("logoDataUrl".to_string()),
+            original_value: Some("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAA==".to_string()),
+            message: "Failed parsing {\"bizora_clients_v1\":[{\"id\":\"1\"}]} with Bearer super_secret_token and data:image/jpeg;base64,/9j/4AAQSk".to_string(),
+            suggested_action: "Retry backup after freeing disk space.\r\nKeep password=topsecret out.".to_string(),
+        };
+
+        let persisted = record_migration_error(&mut env.conn, &raw_diag)
+            .expect("sanitized diagnostic recording must succeed");
+
+        assert_eq!(persisted.code, "BACKUP_WRITE_FAILED [31m");
+        assert_eq!(persisted.severity, "error");
+        assert!(!persisted.code.contains('\n'));
+        assert!(!persisted.code.contains('\x1b'));
+        assert_eq!(
+            persisted.record_id.as_deref(),
+            Some("[REDACTED_RAW_PAYLOAD]")
+        );
+        assert_eq!(
+            persisted.original_value.as_deref(),
+            Some("[REDACTED_DATA_URI]")
+        );
+        assert_eq!(persisted.message, "[REDACTED_RAW_PAYLOAD]");
+        assert_eq!(persisted.suggested_action, "[REDACTED_SECRET]");
+
+        // Verify data URI redaction inline inside plain messages as well
+        let data_uri_msg = MigrationDiagnosticDto {
+            code: "INVALID_LOGO".to_string(),
+            severity: "warning".to_string(),
+            stage: "normalize".to_string(),
+            entity_type: "business".to_string(),
+            record_id: Some("biz_1".to_string()),
+            field: Some("logoUrl".to_string()),
+            original_value: Some("data:image/png;base64,AAAA".to_string()),
+            message: "Logo skipped — data:image/png;base64,iVBORw0KGgo= exceeded inline limit".to_string(),
+            suggested_action: "Upload a smaller PNG or SVG logo.".to_string(),
+        };
+        let persisted_inline = record_migration_error(&mut env.conn, &data_uri_msg).unwrap();
+        assert_eq!(
+            persisted_inline.message,
+            "Logo skipped — [REDACTED_DATA_URI] exceeded inline limit"
+        );
+        assert_eq!(
+            persisted_inline.original_value.as_deref(),
+            Some("[REDACTED_DATA_URI]")
+        );
+
+        let status = get_migration_status(&env.conn).unwrap();
+        assert_eq!(status.state, MigrationState::Absent);
+        assert_eq!(status.last_error, Some(persisted_inline));
+
+        // Blank required fields must be rejected
+        let invalid_diag = MigrationDiagnosticDto {
+            code: "   ".to_string(),
+            ..data_uri_msg
+        };
+        let err = record_migration_error(&mut env.conn, &invalid_diag)
+            .expect_err("blank code must fail validation");
+        assert!(matches!(err, DbError::InvalidInput { .. }));
+    }
+
+    #[test]
+    fn replace_desktop_workspace_rolls_back_mid_transaction_leaving_previous_workspace_intact() {
+        let mut env = TempDbEnv::new("replace_rollback");
+        let backup = backup_legacy_localstorage(&env.db_path, &make_raw_backup_input()).unwrap();
+        let initial_payload = make_valid_migration_payload(backup);
+        migrate_legacy_workspace(&mut env.conn, &env.db_path, &initial_payload).unwrap();
+
+        // 1. Pre-validation error leaves existing workspace untouched
+        let mut invalid_replace = make_replace_workspace_input("json_backup_restore", "01");
+        invalid_replace.business.name = "   ".to_string();
+        let pre_err = replace_desktop_workspace(&mut env.conn, &invalid_replace)
+            .expect_err("blank business name must fail before delete");
+        assert!(matches!(pre_err, DbError::InvalidInput { .. }));
+
+        // 2. Mid-transaction SQLite constraint error (after DELETE + partial INSERTs) must roll back cleanly
+        let mut mid_tx_fail = make_replace_workspace_input("json_backup_restore", "02");
+        let mut dup_client = mid_tx_fail.clients[0].clone();
+        dup_client.id = "44444444-4444-4444-8444-000000000099".to_string();
+        // Same business_id + legacy_id triggers SQLite UNIQUE(business_id, legacy_id) after business + assets + client[0] inserted!
+        mid_tx_fail.clients.push(dup_client);
+
+        let tx_err = replace_desktop_workspace(&mut env.conn, &mid_tx_fail)
+            .expect_err("mid-transaction constraint error must roll back");
+        assert!(matches!(tx_err, DbError::UniqueConstraint(_)));
+
+        // Previous migrated workspace and its Completed marker remain 100% intact
+        let counts = collect_counts(&env.conn).unwrap();
+        assert_eq!(counts.businesses.get(), 1);
+        assert_eq!(counts.clients.get(), 1);
+        assert_eq!(counts.quotations.get(), 1);
+        assert_eq!(counts.invoices.get(), 2);
+        assert_eq!(counts.payments.get(), 1);
+        assert_eq!(counts.activity_logs.get(), 1);
+
+        let biz_name: String = env
+            .conn
+            .query_row("SELECT name FROM businesses LIMIT 1;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(biz_name, "Kalahari Creative Studio");
+        assert_eq!(
+            get_migration_status(&env.conn).unwrap().state,
+            MigrationState::Completed
+        );
+    }
+
+    #[test]
+    fn replace_desktop_workspace_preserves_completed_marker_refuses_conflict_and_marks_fresh_not_needed() {
+        // Subcase A: Fresh empty DB -> marks not_needed atomically
+        let mut env_fresh = TempDbEnv::new("replace_fresh");
+        let fresh_input = make_replace_workspace_input("desktop_fresh_install", "11");
+        let fresh_res = replace_desktop_workspace(&mut env_fresh.conn, &fresh_input)
+            .expect("fresh workspace init must succeed");
+        assert_eq!(fresh_res.migration_state, MigrationState::NotNeeded);
+        assert_eq!(
+            fresh_res.business_id.as_deref(),
+            Some(fresh_input.business.id.as_str())
+        );
+        assert_eq!(
+            get_migration_status(&env_fresh.conn).unwrap().state,
+            MigrationState::NotNeeded
+        );
+
+        // Subcase B: Migrated DB (Completed) -> replacement preserves Completed marker
+        let mut env_migrated = TempDbEnv::new("replace_completed");
+        let backup = backup_legacy_localstorage(&env_migrated.db_path, &make_raw_backup_input()).unwrap();
+        let migrated_payload = make_valid_migration_payload(backup);
+        let migrated = migrate_legacy_workspace(&mut env_migrated.conn, &env_migrated.db_path, &migrated_payload).unwrap();
+
+        let demo_input = make_replace_workspace_input("demo_reset", "22");
+        let res = replace_desktop_workspace(&mut env_migrated.conn, &demo_input)
+            .expect("demo reset on Completed workspace must succeed");
+        assert_eq!(res.migration_state, MigrationState::Completed);
+        assert_eq!(
+            res.business_id.as_deref(),
+            Some(demo_input.business.id.as_str())
+        );
+
+        let status = get_migration_status(&env_migrated.conn).unwrap();
+        assert_eq!(status.state, MigrationState::Completed);
+        assert_eq!(
+            status.migrated_business_id.as_deref(),
+            Some(migrated.migrated_business_id.as_str())
+        );
+        assert_eq!(
+            status.backup_filename.as_deref(),
+            Some(migrated.backup_filename.as_str())
+        );
+
+        // Subcase C: Conflicted DB (business row exists with NO marker) -> must refuse cleanly
+        let mut env_conflict = TempDbEnv::new("replace_conflict");
+        env_conflict
+            .conn
+            .execute(
+                "INSERT INTO businesses (id, name, created_at, updated_at)
+                 VALUES ('biz_conflict', 'Untracked Biz', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z');",
+                [],
+            )
+            .unwrap();
+        let conflict_err = replace_desktop_workspace(
+            &mut env_conflict.conn,
+            &make_replace_workspace_input("demo_reset", "33"),
+        )
+        .expect_err("conflicted DB must refuse silent replacement");
+        assert!(matches!(conflict_err, DbError::UniqueConstraint(_)));
+        let kept_name: String = env_conflict
+            .conn
+            .query_row("SELECT name FROM businesses LIMIT 1;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept_name, "Untracked Biz");
+    }
+
+    #[test]
+    fn replace_desktop_workspace_verifies_circular_fk_and_relationship_integrity() {
+        let mut env = TempDbEnv::new("replace_fk");
+        let first = make_replace_workspace_input("desktop_fresh_install", "41");
+        replace_desktop_workspace(&mut env.conn, &first).unwrap();
+
+        let second = make_replace_workspace_input("json_backup_restore", "42");
+        let res = replace_desktop_workspace(&mut env.conn, &second)
+            .expect("replacing circular-FK workspace with another circular-FK workspace must succeed");
+
+        assert_eq!(res.counts.businesses.get(), 1);
+        assert_eq!(res.counts.business_assets.get(), 1);
+        assert_eq!(res.counts.clients.get(), 1);
+        assert_eq!(res.counts.quotations.get(), 1);
+        assert_eq!(res.counts.quotation_items.get(), 1);
+        assert_eq!(res.counts.invoices.get(), 1);
+        assert_eq!(res.counts.invoice_items.get(), 1);
+        assert_eq!(res.counts.payments.get(), 1);
+        assert_eq!(res.counts.activity_logs.get(), 1);
+
+        let (logo_id, q_conv_id, inv_q_id): (Option<String>, Option<String>, Option<String>) = env
+            .conn
+            .query_row(
+                "SELECT
+                    (SELECT logo_asset_id FROM businesses LIMIT 1),
+                    (SELECT converted_invoice_id FROM quotations LIMIT 1),
+                    (SELECT quotation_id FROM invoices LIMIT 1);",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(logo_id, second.business.logo_asset_id);
+        assert_eq!(q_conv_id, second.quotations[0].converted_invoice_id);
+        assert_eq!(inv_q_id, second.invoices[0].quotation_id);
+        verify_foreign_keys_in_tx(&env.conn, "Post-replace test").unwrap();
+    }
+
+    #[test]
+    fn clear_desktop_workspace_clears_all_business_tables_safely_preserving_marker_backups_and_theme() {
+        let mut env = TempDbEnv::new("clear_safe");
+        let backup = backup_legacy_localstorage(&env.db_path, &make_raw_backup_input()).unwrap();
+        let payload = make_valid_migration_payload(backup.clone());
+        let migrated = migrate_legacy_workspace(&mut env.conn, &env.db_path, &payload).unwrap();
+
+        let cleared = clear_desktop_workspace(&mut env.conn, Some("clear_all_data"))
+            .expect("clearing migrated workspace must succeed cleanly");
+        assert_eq!(cleared.migration_state, MigrationState::Completed);
+        assert!(cleared.business_id.is_none());
+        assert_eq!(cleared.counts.businesses.get(), 0);
+        assert_eq!(cleared.counts.business_assets.get(), 0);
+        assert_eq!(cleared.counts.clients.get(), 0);
+        assert_eq!(cleared.counts.quotations.get(), 0);
+        assert_eq!(cleared.counts.quotation_items.get(), 0);
+        assert_eq!(cleared.counts.invoices.get(), 0);
+        assert_eq!(cleared.counts.invoice_items.get(), 0);
+        assert_eq!(cleared.counts.payments.get(), 0);
+        assert_eq!(cleared.counts.activity_logs.get(), 0);
+
+        // Migration marker preserved (prevents silent LocalStorage re-import on next boot)
+        let status = get_migration_status(&env.conn).unwrap();
+        assert_eq!(status.state, MigrationState::Completed);
+        assert_eq!(
+            status.migrated_business_id.as_deref(),
+            Some(migrated.migrated_business_id.as_str())
+        );
+
+        // Non-migration theme preference preserved
+        let theme = read_setting_json(&env.conn, "theme_preference")
+            .unwrap()
+            .expect("theme_preference must remain intact");
+        assert_eq!(theme, "\"dark\"");
+
+        // Verified backup file on disk untouched
+        verify_existing_backup_file(&env.db_path, &backup)
+            .expect("verified pre-migration backup on disk must remain intact");
+        verify_foreign_keys_in_tx(&env.conn, "Post-clear test").unwrap();
+
+        // Conflicted DB must refuse clear_desktop_workspace
+        let mut env_conflict = TempDbEnv::new("clear_conflict");
+        env_conflict
+            .conn
+            .execute(
+                "INSERT INTO businesses (id, name, created_at, updated_at)
+                 VALUES ('biz_conflict', 'Conflicted Biz', '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z');",
+                [],
+            )
+            .unwrap();
+        let clear_err = clear_desktop_workspace(&mut env_conflict.conn, Some("clear_all_data"))
+            .expect_err("conflicted DB must refuse workspace clear");
+        assert!(matches!(clear_err, DbError::UniqueConstraint(_)));
+        assert_eq!(query_table_count(&env_conflict.conn, "businesses").unwrap(), 1);
     }
 }

@@ -6,9 +6,9 @@ use super::dto::{
     CreateBusinessAssetInput, CreateBusinessInput, CreateClientInput, CreateInvoiceInput,
     CreateLocalProfileInput, CreatePaymentInput, CreateQuotationInput, InvoiceDto, InvoiceItemDto,
     LegacyWorkspaceMigrationInput, LocalProfileDto, MigrationDiagnosticDto, MigrationResultDto,
-    MigrationStatusDto, PaymentDto, QuotationDto, QuotationItemDto, SaveAppSettingInput,
-    UpdateBusinessInput, UpdateClientInput, UpdateInvoiceInput, UpdateLocalProfileInput,
-    UpdateQuotationInput,
+    MigrationStatusDto, PaymentDto, QuotationDto, QuotationItemDto, ReplaceDesktopWorkspaceInput,
+    SaveAppSettingInput, UpdateBusinessInput, UpdateClientInput, UpdateInvoiceInput,
+    UpdateLocalProfileInput, UpdateQuotationInput, WorkspaceLifecycleResultDto,
 };
 use super::precision::SafeI64;
 use super::repositories::{
@@ -591,4 +591,53 @@ pub async fn migrate_legacy_workspace(
 
     result.map_err(|err| CommandError::from(&err))
 }
+
+// ============================================================
+// Desktop Runtime Lifecycle & Safeguards (Stage 2.2.4, Step 1)
+// ============================================================
+
+#[tauri::command]
+pub async fn mark_migration_not_needed(
+    db_manager: State<'_, DatabaseManager>,
+    source: Option<String>,
+) -> Result<MigrationStatusDto, CommandError> {
+    run_db_task(db_manager, move |conn| {
+        migration_repository::mark_migration_not_needed(conn, source.as_deref())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn record_migration_error(
+    db_manager: State<'_, DatabaseManager>,
+    diagnostic: MigrationDiagnosticDto,
+) -> Result<MigrationDiagnosticDto, CommandError> {
+    run_db_task(db_manager, move |conn| {
+        migration_repository::record_migration_error(conn, &diagnostic)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn replace_desktop_workspace(
+    db_manager: State<'_, DatabaseManager>,
+    input: ReplaceDesktopWorkspaceInput,
+) -> Result<WorkspaceLifecycleResultDto, CommandError> {
+    run_db_task(db_manager, move |conn| {
+        migration_repository::replace_desktop_workspace(conn, &input)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn clear_desktop_workspace(
+    db_manager: State<'_, DatabaseManager>,
+    source: Option<String>,
+) -> Result<WorkspaceLifecycleResultDto, CommandError> {
+    run_db_task(db_manager, move |conn| {
+        migration_repository::clear_desktop_workspace(conn, source.as_deref())
+    })
+    .await
+}
+
 

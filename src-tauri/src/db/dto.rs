@@ -1121,3 +1121,39 @@ pub struct MigrationResultDto {
     pub completed_at: String,
 }
 
+// ============================================================
+// Desktop Workspace Lifecycle (Stage 2.2.4, Step 1)
+// ============================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplaceDesktopWorkspaceInput {
+    #[serde(default)]
+    pub source: Option<String>,
+    pub local_profile: CreateLocalProfileInput,
+    pub business: CreateBusinessInput,
+    #[serde(default)]
+    pub assets: Vec<CreateBusinessAssetInput>,
+    #[serde(default)]
+    pub clients: Vec<CreateClientInput>,
+    #[serde(default)]
+    pub quotations: Vec<CreateQuotationInput>,
+    #[serde(default)]
+    pub invoices: Vec<CreateInvoiceInput>,
+    #[serde(default)]
+    pub payments: Vec<CreatePaymentInput>,
+    #[serde(default)]
+    pub activity_logs: Vec<CreateActivityLogInput>,
+    #[serde(default)]
+    pub settings: Vec<SaveAppSettingInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceLifecycleResultDto {
+    pub migration_state: MigrationState,
+    pub business_id: Option<String>,
+    pub local_profile_id: Option<String>,
+    pub counts: MigrationCountsDto,
+    pub completed_at: String,
+}
