@@ -528,6 +528,10 @@ pub fn get_migration_status(conn: &Connection) -> Result<MigrationStatusDto, DbE
     })
 }
 
+const REDACTED_DATA_URI: &str = "[REDACTED_DATA_URI]";
+const REDACTED_RAW_PAYLOAD: &str = "[REDACTED_RAW_PAYLOAD]";
+const REDACTED_SECRET: &str = "[REDACTED_SECRET]";
+
 fn redact_data_uris(input: &str) -> String {
     let lower = input.to_ascii_lowercase();
     let mut out = String::with_capacity(input.len());
@@ -547,7 +551,7 @@ fn redact_data_uris(input: &str) -> String {
             || header.starts_with("data:text/")
         {
             out.push_str(&input[cursor..start]);
-            out.push_str("[REDACTED_DATA_URI]");
+            out.push_str(REDACTED_DATA_URI);
             cursor = start + token_len;
         } else {
             let advance = "data:".len();
@@ -582,6 +586,38 @@ fn sanitize_diagnostic_text(raw: &str, max_chars: usize) -> String {
         .collect();
 
     let collapsed = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return String::new();
+    }
+
+    // Preserve exact redaction sentinels across repeated sanitization passes so
+    // "[REDACTED_DATA_URI]" or "[REDACTED_SECRET]" are never reclassified as raw JSON arrays.
+    if matches!(
+        collapsed.as_str(),
+        REDACTED_DATA_URI | REDACTED_RAW_PAYLOAD | REDACTED_SECRET
+    ) {
+        return collapsed.chars().take(max_chars).collect();
+    }
+
+    // Check raw LocalStorage / JSON payload patterns before substituting data URIs so that
+    // "[REDACTED_DATA_URI]" is not misclassified as a bracketed JSON array ("[...]") and
+    // JSON objects/arrays containing inline data URIs are still redacted as raw payloads.
+    let lower_collapsed = collapsed.to_ascii_lowercase();
+    let looks_like_raw_storage = ALLOWED_LEGACY_KEYS.iter().any(|k| lower_collapsed.contains(k))
+        || (collapsed.starts_with('{') && collapsed.ends_with('}'))
+        || (collapsed.starts_with('[') && collapsed.ends_with(']'))
+        || collapsed.starts_with("{\"")
+        || collapsed.starts_with("[{\"")
+        || collapsed.contains("\":{\"")
+        || collapsed.contains("\":[{\"");
+
+    if looks_like_raw_storage {
+        return REDACTED_RAW_PAYLOAD
+            .chars()
+            .take(max_chars)
+            .collect();
+    }
+
     let uri_redacted = redact_data_uris(&collapsed);
     let trimmed = uri_redacted.trim();
     if trimmed.is_empty() {
@@ -589,21 +625,6 @@ fn sanitize_diagnostic_text(raw: &str, max_chars: usize) -> String {
     }
 
     let lower = trimmed.to_ascii_lowercase();
-    let looks_like_raw_storage = ALLOWED_LEGACY_KEYS.iter().any(|k| lower.contains(k))
-        || (trimmed.starts_with('{') && trimmed.ends_with('}'))
-        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
-        || trimmed.starts_with("{\"")
-        || trimmed.starts_with("[{\"")
-        || trimmed.contains("\":{\"")
-        || trimmed.contains("\":[{\"");
-
-    if looks_like_raw_storage {
-        return "[REDACTED_RAW_PAYLOAD]"
-            .chars()
-            .take(max_chars)
-            .collect();
-    }
-
     let looks_like_secret = lower.contains("bearer ")
         || lower.contains("password=")
         || lower.contains("password:")
@@ -621,7 +642,7 @@ fn sanitize_diagnostic_text(raw: &str, max_chars: usize) -> String {
         || contains_jwt_like_token(trimmed);
 
     if looks_like_secret {
-        return "[REDACTED_SECRET]".chars().take(max_chars).collect();
+        return REDACTED_SECRET.chars().take(max_chars).collect();
     }
 
     trimmed.chars().take(max_chars).collect()
@@ -3479,6 +3500,111 @@ mod tests {
         let err = record_migration_error(&mut env.conn, &invalid_diag)
             .expect_err("blank code must fail validation");
         assert!(matches!(err, DbError::InvalidInput { .. }));
+    }
+
+    #[test]
+    fn sanitize_diagnostic_redacts_data_uris_raw_payloads_secrets_and_surrounding_unicode_safely() {
+        let mut env = TempDbEnv::new("sanitize_matrix");
+
+        // 1. Data URI alone & multiple data URIs without triggering bracketed JSON array rule
+        assert_eq!(
+            sanitize_diagnostic_text("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAA==", 120),
+            "[REDACTED_DATA_URI]"
+        );
+        assert_eq!(
+            sanitize_diagnostic_text(
+                "data:image/png;base64,AAAA data:application/pdf;base64,JVBERi0xLjQ=",
+                120
+            ),
+            "[REDACTED_DATA_URI] [REDACTED_DATA_URI]"
+        );
+
+        // 2. Raw LocalStorage JSON/payload alone (including spaced JSON wrapping a data URI)
+        assert_eq!(
+            sanitize_diagnostic_text("[{\"id\":\"cli_1\",\"name\":\"Helena\"}]", 400),
+            "[REDACTED_RAW_PAYLOAD]"
+        );
+        assert_eq!(
+            sanitize_diagnostic_text(
+                "{ \"email\": \"secret@example.com\", \"logo\": \"data:image/png;base64,AAAA\" }",
+                400
+            ),
+            "[REDACTED_RAW_PAYLOAD]"
+        );
+        assert_eq!(
+            sanitize_diagnostic_text("Key bizora_invoices_v1 failed to decode", 400),
+            "[REDACTED_RAW_PAYLOAD]"
+        );
+
+        // 3. Both data URI and raw LocalStorage JSON in the same diagnostic
+        let combined = MigrationDiagnosticDto {
+            code: "COMBINED_FAILURE".to_string(),
+            severity: "error".to_string(),
+            stage: "normalize".to_string(),
+            entity_type: "business".to_string(),
+            record_id: Some("biz_1".to_string()),
+            field: Some("logoUrl".to_string()),
+            original_value: Some("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=".to_string()),
+            message: "data:image/png;base64,AAAA inside {\"bizora_business_profile_v1\":{\"name\":\"Test\"}}".to_string(),
+            suggested_action: "Re-upload business logo.".to_string(),
+        };
+        let persisted_combined = record_migration_error(&mut env.conn, &combined).unwrap();
+        assert_eq!(
+            persisted_combined.original_value.as_deref(),
+            Some("[REDACTED_DATA_URI]")
+        );
+        assert_eq!(persisted_combined.message, "[REDACTED_RAW_PAYLOAD]");
+
+        // 4. Secret / token / JWT redaction
+        assert_eq!(
+            sanitize_diagnostic_text("Auth failed with api_key=super_secret_123", 400),
+            "[REDACTED_SECRET]"
+        );
+        assert_eq!(
+            sanitize_diagnostic_text(
+                "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U rejected",
+                400
+            ),
+            "[REDACTED_SECRET]"
+        );
+
+        // 5. Unicode characters surrounding sensitive content (including >96-byte UTF-8 data URI tokens)
+        let long_unicode_data_uri = format!(
+            "⚠️ data:text/plain;charset=utf-8,{} 中文",
+            "café_".repeat(25)
+        );
+        assert_eq!(
+            sanitize_diagnostic_text(&long_unicode_data_uri, 400),
+            "⚠️ [REDACTED_DATA_URI] 中文"
+        );
+        assert_eq!(
+            sanitize_diagnostic_text("Logo ⚠️data:image/png;base64,iVBORw0KGgo=⚠️ skipped", 400),
+            "Logo ⚠️[REDACTED_DATA_URI] skipped"
+        );
+        assert_eq!(
+            sanitize_diagnostic_text("⚠️ {\"bizora_clients_v1\":[{\"id\":\"1\"}]} 中文", 400),
+            "[REDACTED_RAW_PAYLOAD]"
+        );
+        assert_eq!(
+            sanitize_diagnostic_text("⚠️ Keep password=topsecret 中文", 400),
+            "[REDACTED_SECRET]"
+        );
+
+        // 6. Repeated sanitization remains idempotent on all redaction sentinels
+        let resanitized = sanitize_diagnostic(persisted_combined.clone());
+        assert_eq!(resanitized, persisted_combined);
+        assert_eq!(
+            sanitize_diagnostic_text("[REDACTED_SECRET]", 120),
+            "[REDACTED_SECRET]"
+        );
+        assert_eq!(
+            sanitize_diagnostic_text("[REDACTED_DATA_URI]", 120),
+            "[REDACTED_DATA_URI]"
+        );
+        assert_eq!(
+            sanitize_diagnostic_text("[REDACTED_RAW_PAYLOAD]", 120),
+            "[REDACTED_RAW_PAYLOAD]"
+        );
     }
 
     #[test]
