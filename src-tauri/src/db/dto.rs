@@ -983,3 +983,141 @@ impl From<AppSettingRow> for AppSettingDto {
         }
     }
 }
+
+// ============================================================
+// Legacy LocalStorage Migration (Phase 2, Stage 2.2.3)
+// ============================================================
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MigrationState {
+    Absent,
+    NotNeeded,
+    Completed,
+    ConflictExistingData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationCountsDto {
+    pub local_profiles: SafeI64,
+    pub businesses: SafeI64,
+    pub business_assets: SafeI64,
+    pub clients: SafeI64,
+    pub quotations: SafeI64,
+    pub quotation_items: SafeI64,
+    pub invoices: SafeI64,
+    pub invoice_items: SafeI64,
+    pub payments: SafeI64,
+    pub activity_logs: SafeI64,
+    pub app_settings: SafeI64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationDiagnosticDto {
+    pub code: String,
+    pub severity: String,
+    pub stage: String,
+    pub entity_type: String,
+    #[serde(default)]
+    pub record_id: Option<String>,
+    #[serde(default)]
+    pub field: Option<String>,
+    #[serde(default)]
+    pub original_value: Option<String>,
+    pub message: String,
+    pub suggested_action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationStatusDto {
+    pub state: MigrationState,
+    pub marker_version: Option<i64>,
+    pub completed_at: Option<String>,
+    pub migrated_business_id: Option<String>,
+    pub backup_filename: Option<String>,
+    pub last_error: Option<MigrationDiagnosticDto>,
+    pub existing_counts: MigrationCountsDto,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawLegacyKeyEntry {
+    pub key: String,
+    pub present: bool,
+    #[serde(default)]
+    pub present_in_local_storage: bool,
+    #[serde(default)]
+    pub present_in_memory_fallback: bool,
+    #[serde(default)]
+    pub raw_value: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupLegacyStorageInput {
+    pub captured_at: String,
+    #[serde(default)]
+    pub source: String,
+    pub keys: Vec<RawLegacyKeyEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupLegacyStorageResult {
+    pub backup_filename: String,
+    pub byte_size: SafeI64,
+    pub sha256: String,
+    pub verified: bool,
+    pub captured_key_count: SafeI64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpectedFinancialSumsInput {
+    pub quotation_grand_total_sum_minor: SafeI64,
+    pub invoice_grand_total_sum_minor: SafeI64,
+    pub invoice_amount_paid_sum_minor: SafeI64,
+    pub payment_amount_sum_minor: SafeI64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyWorkspaceMigrationInput {
+    pub backup_verification: BackupLegacyStorageResult,
+    pub local_profile: CreateLocalProfileInput,
+    pub business: CreateBusinessInput,
+    #[serde(default)]
+    pub assets: Vec<CreateBusinessAssetInput>,
+    #[serde(default)]
+    pub clients: Vec<CreateClientInput>,
+    #[serde(default)]
+    pub quotations: Vec<CreateQuotationInput>,
+    #[serde(default)]
+    pub invoices: Vec<CreateInvoiceInput>,
+    #[serde(default)]
+    pub payments: Vec<CreatePaymentInput>,
+    #[serde(default)]
+    pub activity_logs: Vec<CreateActivityLogInput>,
+    #[serde(default)]
+    pub settings: Vec<SaveAppSettingInput>,
+    #[serde(default)]
+    pub diagnostics: Vec<MigrationDiagnosticDto>,
+    #[serde(default)]
+    pub expected_financial_sums: Option<ExpectedFinancialSumsInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationResultDto {
+    pub state: MigrationState,
+    pub migrated_business_id: String,
+    pub local_profile_id: String,
+    pub backup_filename: String,
+    pub counts: MigrationCountsDto,
+    pub diagnostics: Vec<MigrationDiagnosticDto>,
+    pub completed_at: String,
+}
+

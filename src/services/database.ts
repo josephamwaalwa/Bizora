@@ -193,6 +193,142 @@ export function scaledInt64ToDecimal(value: SafeInt64, decimals: number): string
   return `${negative ? '-' : ''}${whole.toString()}${decimals > 0 ? `.${frac}` : ''}`;
 }
 
+function expandFiniteNumberToPlainDecimal(num: number): string {
+  const str = String(num);
+  if (!/[eE]/.test(str)) {
+    return str;
+  }
+  const match = /^(-)?(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/.exec(str);
+  if (!match) {
+    throw new DatabaseCommandError({
+      code: 'INVALID_INPUT',
+      message: `Invalid numeric representation '${str}'`,
+    });
+  }
+  const sign = match[1] ? '-' : '';
+  const intPart = match[2];
+  const fracPart = match[3] ?? '';
+  const exp = Number.parseInt(match[4], 10);
+  const digits = intPart + fracPart;
+  const decimalPos = intPart.length + exp;
+
+  if (decimalPos <= 0) {
+    return `${sign}0.${'0'.repeat(-decimalPos)}${digits}`;
+  }
+  if (decimalPos >= digits.length) {
+    return `${sign}${digits}${'0'.repeat(decimalPos - digits.length)}`;
+  }
+  return `${sign}${digits.slice(0, decimalPos)}.${digits.slice(decimalPos)}`;
+}
+
+/**
+ * Lossless decimal-to-SafeInt64 conversion for historical migration.
+ * Never rounds, clamps, or truncates non-zero fractional digits past `decimals`.
+ */
+export function strictDecimalToScaledInt64(
+  rawValue: unknown,
+  decimals: number,
+  fieldName?: string
+): SafeInt64 {
+  validateScaleDecimals(decimals);
+
+  let normalizedDecimal: string;
+  if (typeof rawValue === 'number') {
+    if (!Number.isFinite(rawValue)) {
+      throw new DatabaseCommandError({
+        code: 'INVALID_INPUT',
+        field: fieldName,
+        message: 'Numeric value must be finite (NaN and Infinity are not allowed)',
+      });
+    }
+    normalizedDecimal = Object.is(rawValue, -0) ? '0' : expandFiniteNumberToPlainDecimal(rawValue);
+  } else if (typeof rawValue === 'string') {
+    const trimmed = rawValue.trim();
+    if (!trimmed) {
+      throw new DatabaseCommandError({
+        code: 'INVALID_INPUT',
+        field: fieldName,
+        message: 'Numeric string cannot be empty',
+      });
+    }
+    if (/[eE]/.test(trimmed)) {
+      const sciMatch = /^(-)?(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/.exec(trimmed);
+      if (!sciMatch) {
+        throw new DatabaseCommandError({
+          code: 'INVALID_INPUT',
+          field: fieldName,
+          message: `Invalid numeric value '${trimmed}'`,
+        });
+      }
+      const sign = sciMatch[1] ? '-' : '';
+      const intPart = sciMatch[2];
+      const fracPart = sciMatch[3] ?? '';
+      const exp = Number.parseInt(sciMatch[4], 10);
+      const digits = intPart + fracPart;
+      const decimalPos = intPart.length + exp;
+      if (decimalPos <= 0) {
+        normalizedDecimal = `${sign}0.${'0'.repeat(-decimalPos)}${digits}`;
+      } else if (decimalPos >= digits.length) {
+        normalizedDecimal = `${sign}${digits}${'0'.repeat(decimalPos - digits.length)}`;
+      } else {
+        normalizedDecimal = `${sign}${digits.slice(0, decimalPos)}.${digits.slice(decimalPos)}`;
+      }
+    } else {
+      normalizedDecimal = trimmed;
+    }
+  } else {
+    throw new DatabaseCommandError({
+      code: 'INVALID_INPUT',
+      field: fieldName,
+      message: 'Required numeric value is missing or has an invalid type',
+    });
+  }
+
+  const match = /^(-)?(\d+)(?:\.(\d+))?$/.exec(normalizedDecimal);
+  if (!match) {
+    throw new DatabaseCommandError({
+      code: 'INVALID_INPUT',
+      field: fieldName,
+      message: `Invalid decimal value '${normalizedDecimal}'`,
+    });
+  }
+
+  const negative = Boolean(match[1]);
+  const whole = match[2];
+  const fracRaw = match[3] ?? '';
+
+  if (fracRaw.length > decimals) {
+    const extraDigits = fracRaw.slice(decimals);
+    if (!/^0+$/.test(extraDigits)) {
+      throw new DatabaseCommandError({
+        code: 'UNREPRESENTABLE_FINANCIAL_PRECISION',
+        field: fieldName,
+        message: `Value '${normalizedDecimal}' exceeds ${decimals} decimal places and cannot be represented without rounding loss`,
+      });
+    }
+  }
+
+  const scaleFactor = 10n ** BigInt(decimals);
+  const padded = fracRaw.slice(0, decimals).padEnd(decimals, '0');
+  let scaled = BigInt(whole) * scaleFactor + (padded ? BigInt(padded) : 0n);
+  if (negative && scaled !== 0n) {
+    scaled = -scaled;
+  }
+
+  try {
+    return toSafeInt64(scaled);
+  } catch (err) {
+    if (err instanceof DatabaseCommandError && fieldName && !err.field) {
+      throw new DatabaseCommandError({
+        code: err.code,
+        message: err.message,
+        field: fieldName,
+      });
+    }
+    throw err;
+  }
+}
+
 export type QuotationStatus = 'draft' | 'sent' | 'accepted' | 'declined' | 'expired';
 export type InvoiceStatus = 'draft' | 'sent' | 'partially_paid' | 'paid' | 'overdue';
 export type DiscountType = 'percentage' | 'fixed';
@@ -718,6 +854,113 @@ export interface SaveAppSettingInput {
   updatedAt?: string | null;
 }
 
+export type MigrationState =
+  | 'absent'
+  | 'not_needed'
+  | 'completed'
+  | 'conflict_existing_data';
+
+export type MigrationDiagnosticSeverity = 'error' | 'warning' | 'info';
+
+export type MigrationDiagnosticStage =
+  | 'backup'
+  | 'extract'
+  | 'normalize'
+  | 'relationship'
+  | 'validate'
+  | 'sqlite_import'
+  | 'verify';
+
+export interface MigrationCountsDto {
+  localProfiles: SafeInt64;
+  businesses: SafeInt64;
+  businessAssets: SafeInt64;
+  clients: SafeInt64;
+  quotations: SafeInt64;
+  quotationItems: SafeInt64;
+  invoices: SafeInt64;
+  invoiceItems: SafeInt64;
+  payments: SafeInt64;
+  activityLogs: SafeInt64;
+  appSettings: SafeInt64;
+}
+
+export interface MigrationDiagnosticDto {
+  code: string;
+  severity: MigrationDiagnosticSeverity;
+  stage: MigrationDiagnosticStage;
+  entityType: string;
+  recordId: string | null;
+  field: string | null;
+  originalValue: string | null;
+  message: string;
+  suggestedAction: string;
+}
+
+export interface MigrationStatusDto {
+  state: MigrationState;
+  markerVersion: number | null;
+  completedAt: string | null;
+  migratedBusinessId: string | null;
+  backupFilename: string | null;
+  lastError: MigrationDiagnosticDto | null;
+  existingCounts: MigrationCountsDto;
+}
+
+export interface RawLegacyKeyEntry {
+  key: string;
+  present: boolean;
+  presentInLocalStorage: boolean;
+  presentInMemoryFallback: boolean;
+  rawValue: string | null;
+}
+
+export interface BackupLegacyStorageInput {
+  capturedAt: string;
+  source: string;
+  keys: RawLegacyKeyEntry[];
+}
+
+export interface BackupLegacyStorageResult {
+  backupFilename: string;
+  byteSize: SafeInt64;
+  sha256: string;
+  verified: boolean;
+  capturedKeyCount: SafeInt64;
+}
+
+export interface ExpectedFinancialSumsInput {
+  quotationGrandTotalSumMinor: SafeInt64;
+  invoiceGrandTotalSumMinor: SafeInt64;
+  invoiceAmountPaidSumMinor: SafeInt64;
+  paymentAmountSumMinor: SafeInt64;
+}
+
+export interface LegacyWorkspaceMigrationInput {
+  backupVerification: BackupLegacyStorageResult;
+  localProfile: CreateLocalProfileInput;
+  business: CreateBusinessInput;
+  assets: CreateBusinessAssetInput[];
+  clients: CreateClientInput[];
+  quotations: CreateQuotationInput[];
+  invoices: CreateInvoiceInput[];
+  payments: CreatePaymentInput[];
+  activityLogs: CreateActivityLogInput[];
+  settings: SaveAppSettingInput[];
+  diagnostics: MigrationDiagnosticDto[];
+  expectedFinancialSums?: ExpectedFinancialSumsInput | null;
+}
+
+export interface MigrationResultDto {
+  state: MigrationState;
+  migratedBusinessId: string;
+  localProfileId: string;
+  backupFilename: string;
+  counts: MigrationCountsDto;
+  diagnostics: MigrationDiagnosticDto[];
+  completedAt: string;
+}
+
 function normalizeCommandError(err: unknown): DatabaseCommandError {
   if (err instanceof DatabaseCommandError) {
     return err;
@@ -966,6 +1209,23 @@ export function deleteAppSetting(key: string): Promise<void> {
   return invokeDbCommand('delete_app_setting', { key });
 }
 
+// Legacy LocalStorage Migration (Stage 2.2.3)
+export function getMigrationStatus(): Promise<MigrationStatusDto> {
+  return invokeDbCommand('get_migration_status');
+}
+
+export function backupLegacyLocalstorage(
+  input: BackupLegacyStorageInput
+): Promise<BackupLegacyStorageResult> {
+  return invokeDbCommand('backup_legacy_localstorage', { input });
+}
+
+export function migrateLegacyWorkspace(
+  input: LegacyWorkspaceMigrationInput
+): Promise<MigrationResultDto> {
+  return invokeDbCommand('migrate_legacy_workspace', { input });
+}
+
 export const DesktopDatabaseService = {
   isSupported: isTauri,
   initializeDesktopDatabase,
@@ -973,6 +1233,7 @@ export const DesktopDatabaseService = {
   toSafeInt64,
   parseSafeInt64,
   decimalToScaledInt64,
+  strictDecimalToScaledInt64,
   scaledInt64ToDecimal,
   createLocalProfile,
   getLocalProfileById,
@@ -1014,4 +1275,8 @@ export const DesktopDatabaseService = {
   getAppSetting,
   saveAppSetting,
   deleteAppSetting,
+  getMigrationStatus,
+  backupLegacyLocalstorage,
+  migrateLegacyWorkspace,
 };
+

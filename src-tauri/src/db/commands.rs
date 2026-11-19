@@ -1,18 +1,20 @@
 use tauri::State;
 
 use super::dto::{
-    ActivityLogDto, AppSettingDto, BusinessAssetDto, BusinessDto, ClientDto, CommandError,
-    CreateActivityLogInput, CreateBusinessAssetInput, CreateBusinessInput, CreateClientInput,
-    CreateInvoiceInput, CreateLocalProfileInput, CreatePaymentInput, CreateQuotationInput,
-    InvoiceDto, InvoiceItemDto, LocalProfileDto, PaymentDto, QuotationDto, QuotationItemDto,
-    SaveAppSettingInput, UpdateBusinessInput, UpdateClientInput, UpdateInvoiceInput,
-    UpdateLocalProfileInput, UpdateQuotationInput,
+    ActivityLogDto, AppSettingDto, BackupLegacyStorageInput, BackupLegacyStorageResult,
+    BusinessAssetDto, BusinessDto, ClientDto, CommandError, CreateActivityLogInput,
+    CreateBusinessAssetInput, CreateBusinessInput, CreateClientInput, CreateInvoiceInput,
+    CreateLocalProfileInput, CreatePaymentInput, CreateQuotationInput, InvoiceDto, InvoiceItemDto,
+    LegacyWorkspaceMigrationInput, LocalProfileDto, MigrationDiagnosticDto, MigrationResultDto,
+    MigrationStatusDto, PaymentDto, QuotationDto, QuotationItemDto, SaveAppSettingInput,
+    UpdateBusinessInput, UpdateClientInput, UpdateInvoiceInput, UpdateLocalProfileInput,
+    UpdateQuotationInput,
 };
 use super::precision::SafeI64;
 use super::repositories::{
     activity_repository, asset_repository, business_repository, client_repository,
-    invoice_repository, local_profile_repository, payment_repository, quotation_repository,
-    settings_repository,
+    invoice_repository, local_profile_repository, migration_repository, payment_repository,
+    quotation_repository, settings_repository,
 };
 use super::{DatabaseManager, DbError};
 
@@ -515,3 +517,78 @@ pub async fn delete_app_setting(
     })
     .await
 }
+
+// ============================================================
+// Legacy LocalStorage Migration (Stage 2.2.3)
+// ============================================================
+
+#[tauri::command]
+pub async fn get_migration_status(
+    db_manager: State<'_, DatabaseManager>,
+) -> Result<MigrationStatusDto, CommandError> {
+    run_db_task(db_manager, move |conn| {
+        migration_repository::get_migration_status(conn)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn backup_legacy_localstorage(
+    db_manager: State<'_, DatabaseManager>,
+    input: BackupLegacyStorageInput,
+) -> Result<BackupLegacyStorageResult, CommandError> {
+    let manager = db_manager.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        manager.wait_for_startup_if_running()?;
+        let db_path = manager.db_path()?.to_path_buf();
+        migration_repository::backup_legacy_localstorage(&db_path, &input)
+    })
+    .await
+    .map_err(|_| CommandError {
+        code: "INTERNAL_ERROR".to_string(),
+        message: "Backup worker task failed unexpectedly".to_string(),
+        field: None,
+    })?;
+
+    result.map_err(|err| CommandError::from(&err))
+}
+
+#[tauri::command]
+pub async fn migrate_legacy_workspace(
+    db_manager: State<'_, DatabaseManager>,
+    input: LegacyWorkspaceMigrationInput,
+) -> Result<MigrationResultDto, CommandError> {
+    let manager = db_manager.inner().clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = manager.ensure_initialized_connection()?;
+        let db_path = manager.db_path()?.to_path_buf();
+        match migration_repository::migrate_legacy_workspace(&mut conn, &db_path, &input) {
+            Ok(res) => Ok(res),
+            Err(err) => {
+                let cmd_err = CommandError::from(&err);
+                let diag = MigrationDiagnosticDto {
+                    code: cmd_err.code.clone(),
+                    severity: "error".to_string(),
+                    stage: "sqlite_import".to_string(),
+                    entity_type: "workspace".to_string(),
+                    record_id: Some(input.business.id.clone()),
+                    field: cmd_err.field.clone(),
+                    original_value: None,
+                    message: cmd_err.message.clone(),
+                    suggested_action: "Original LocalStorage and verified backup were preserved. Resolve reported issue before retrying.".to_string(),
+                };
+                let _ = migration_repository::record_migration_error(&mut conn, &diag);
+                Err(err)
+            }
+        }
+    })
+    .await
+    .map_err(|_| CommandError {
+        code: "INTERNAL_ERROR".to_string(),
+        message: "Migration worker task failed unexpectedly".to_string(),
+        field: None,
+    })?;
+
+    result.map_err(|err| CommandError::from(&err))
+}
+

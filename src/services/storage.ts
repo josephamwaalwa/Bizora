@@ -8,6 +8,7 @@ import {
 } from './seedData';
 import { calculateInvoiceBalances, determineUpdatedInvoiceStatus } from '../utils/calculations';
 import { formatDocNumber, generateId } from '../utils/idGenerator';
+import { THEME_STORAGE_KEY } from '../utils/theme';
 
 const KEYS = {
   PROFILE: 'bizora_business_profile_v1',
@@ -18,6 +19,33 @@ const KEYS = {
   INITIALIZED: 'bizora_has_initialized_v1',
   LOGO_CACHE: 'bizora_logo_cache_v1',
 };
+
+export const LEGACY_STORAGE_KEYS = [
+  KEYS.PROFILE,
+  KEYS.CLIENTS,
+  KEYS.QUOTATIONS,
+  KEYS.INVOICES,
+  KEYS.ACTIVITIES,
+  KEYS.INITIALIZED,
+  KEYS.LOGO_CACHE,
+  THEME_STORAGE_KEY,
+] as const;
+
+export type LegacyStorageKey = (typeof LEGACY_STORAGE_KEYS)[number];
+
+export interface RawLegacySnapshotEntry {
+  key: LegacyStorageKey;
+  present: boolean;
+  presentInLocalStorage: boolean;
+  presentInMemoryFallback: boolean;
+  rawValue: string | null;
+}
+
+export interface RawLegacyStorageSnapshot {
+  capturedAt: string;
+  source: string;
+  entries: RawLegacySnapshotEntry[];
+}
 
 const PROFILE_LOGO_MARKER = '__BIZORA_PROFILE_LOGO__';
 const LOGO_REF_PREFIX = '__BIZORA_LOGO__:';
@@ -279,7 +307,7 @@ function isDateBeforeToday(dateString: string | undefined): boolean {
   return parsed < midnightToday;
 }
 
-function restoreUnlinkedQuotationStatus(
+export function restoreUnlinkedQuotationStatus(
   status: QuotationStatus,
   expiryDate?: string,
   preConversionStatus?: QuotationStatus
@@ -1242,4 +1270,62 @@ export const StorageService = {
       return false;
     }
   },
+
+  /**
+   * Captures the exact raw values of the 8 legacy LocalStorage keys without calling init(),
+   * without parsing JSON, and without mutating localStorage or memoryStorage.
+   */
+  getRawMigrationSnapshot(): RawLegacyStorageSnapshot {
+    let localStorageUsed = false;
+    let memoryFallbackUsed = false;
+
+    const entries: RawLegacySnapshotEntry[] = LEGACY_STORAGE_KEYS.map((key) => {
+      let localValue: string | null = null;
+      if (typeof globalThis !== 'undefined' && typeof globalThis.localStorage !== 'undefined') {
+        try {
+          localValue = globalThis.localStorage.getItem(key);
+        } catch {
+          localValue = null;
+        }
+      }
+
+      const memoryValue = memoryStorage.has(key) ? (memoryStorage.get(key) ?? null) : null;
+      const presentInLocalStorage = localValue !== null;
+      const presentInMemoryFallback = memoryValue !== null;
+
+      let rawValue: string | null = null;
+      if (fallbackOnlyKeys.has(key) && presentInMemoryFallback) {
+        rawValue = memoryValue;
+        memoryFallbackUsed = true;
+      } else if (presentInLocalStorage) {
+        rawValue = localValue;
+        localStorageUsed = true;
+      } else if (presentInMemoryFallback) {
+        rawValue = memoryValue;
+        memoryFallbackUsed = true;
+      }
+
+      return {
+        key,
+        present: rawValue !== null,
+        presentInLocalStorage,
+        presentInMemoryFallback,
+        rawValue,
+      };
+    });
+
+    const source =
+      localStorageUsed && memoryFallbackUsed
+        ? 'localStorage+memoryFallback'
+        : memoryFallbackUsed
+          ? 'memoryFallback'
+          : 'localStorage';
+
+    return {
+      capturedAt: new Date().toISOString(),
+      source,
+      entries,
+    };
+  },
 };
+

@@ -4,6 +4,7 @@ pub mod business_repository;
 pub mod client_repository;
 pub mod invoice_repository;
 pub mod local_profile_repository;
+pub mod migration_repository;
 pub mod payment_repository;
 pub mod quotation_repository;
 pub mod settings_repository;

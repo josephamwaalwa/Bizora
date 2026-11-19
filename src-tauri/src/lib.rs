@@ -104,7 +104,10 @@ pub fn run() {
             db::commands::delete_business_asset,
             db::commands::get_app_setting,
             db::commands::save_app_setting,
-            db::commands::delete_app_setting
+            db::commands::delete_app_setting,
+            db::commands::get_migration_status,
+            db::commands::backup_legacy_localstorage,
+            db::commands::migrate_legacy_workspace
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
