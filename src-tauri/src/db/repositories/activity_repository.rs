@@ -100,10 +100,13 @@ pub fn get_activity_logs_by_business(
             ))
             .map_err(|err| map_rusqlite_error(err, "preparing limited activity logs query"))?;
 
-        stmt.query_map(params![business_id, limit], map_activity_row)
+        let rows = stmt
+            .query_map(params![business_id, limit], map_activity_row)
             .map_err(|err| map_rusqlite_error(err, "querying limited activity logs"))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| map_rusqlite_error(err, "reading limited activity log rows"))?
+            .map_err(|err| map_rusqlite_error(err, "reading limited activity log rows"))?;
+
+        rows
     } else {
         let mut stmt = conn
             .prepare(&format!(
@@ -113,10 +116,13 @@ pub fn get_activity_logs_by_business(
             ))
             .map_err(|err| map_rusqlite_error(err, "preparing activity logs query"))?;
 
-        stmt.query_map(params![business_id], map_activity_row)
+        let rows = stmt
+            .query_map(params![business_id], map_activity_row)
             .map_err(|err| map_rusqlite_error(err, "querying activity logs"))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| map_rusqlite_error(err, "reading activity log rows"))?
+            .map_err(|err| map_rusqlite_error(err, "reading activity log rows"))?;
+
+        rows
     };
 
     Ok(rows.into_iter().map(ActivityLogDto::from).collect())
