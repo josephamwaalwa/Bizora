@@ -6,7 +6,6 @@ import { Input } from '../components/common/Input';
 import { Select } from '../components/common/Select';
 import { Textarea } from '../components/common/Textarea';
 import type { BusinessProfile, CurrencyCode } from '../types';
-import { StorageService } from '../services/storage';
 import { exportJsonBackupFile, pickAndReadJsonBackupInTauri } from '../services/fileOperations';
 import { BusinessAvatar } from '../components/common/BusinessAvatar';
 import {
@@ -27,18 +26,29 @@ import {
 export const SettingsPage: React.FC = () => {
   const {
     businessProfile,
+    persistenceBackend,
+    isSaving,
     updateBusinessProfile,
+    exportBackupJson,
+    importBackupJson,
     resetToDemoData,
     clearAllData,
     showConfirmDialog,
     addToast,
-    refreshData,
   } = useApp();
 
-  const [profile, setProfile] = useState<BusinessProfile>({ ...businessProfile });
+  const [syncedProfile, setSyncedProfile] = useState<BusinessProfile>(businessProfile);
+  const [profile, setProfile] = useState<BusinessProfile>(() => ({ ...businessProfile }));
   const [logoPreview, setLogoPreview] = useState<string>(businessProfile.logoUrl || '');
+  const [isBackupBusy, setIsBackupBusy] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const importFileRef = useRef<HTMLInputElement>(null);
+
+  if (syncedProfile !== businessProfile) {
+    setSyncedProfile(businessProfile);
+    setProfile({ ...businessProfile });
+    setLogoPreview(businessProfile.logoUrl || '');
+  }
 
   const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -81,28 +91,24 @@ export const SettingsPage: React.FC = () => {
     }));
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    updateBusinessProfile(profile);
+    if (isSaving) return;
+    await updateBusinessProfile(profile);
   };
 
-  const applyImportedBackupContent = (content: string) => {
-    const success = StorageService.importBackupJson(content);
-    if (!success) {
+  const applyImportedBackupContent = async (content: string) => {
+    const result = await importBackupJson(content);
+    if (!result.ok) {
       addToast({
         type: 'error',
         title: 'Invalid Backup File',
-        message: StorageService.lastImportError || 'The selected file is not a valid Bizora backup JSON.',
+        message: result.error || 'The selected file is not a valid Bizora backup JSON.',
       });
       return;
     }
 
-    const persisted = StorageService.lastWritePersisted;
-    refreshData();
-    setProfile(StorageService.getBusinessProfile());
-    setLogoPreview(StorageService.getBusinessProfile().logoUrl || '');
-
-    if (persisted) {
+    if (result.persisted !== false) {
       addToast({
         type: 'success',
         title: 'Backup Restored',
@@ -119,8 +125,10 @@ export const SettingsPage: React.FC = () => {
 
   // Export JSON Backup
   const handleExportBackup = async () => {
+    if (isBackupBusy) return;
+    setIsBackupBusy(true);
     try {
-      const jsonStr = StorageService.exportBackupJson();
+      const jsonStr = await exportBackupJson();
       const fileName = `bizora-backup-${new Date().toISOString().split('T')[0]}.json`;
       const result = await exportJsonBackupFile(fileName, jsonStr);
       if (result === 'cancelled') return;
@@ -137,11 +145,15 @@ export const SettingsPage: React.FC = () => {
         title: 'Export Failed',
         message: 'Could not save the backup file.',
       });
+    } finally {
+      setIsBackupBusy(false);
     }
   };
 
   // Trigger Import JSON Backup (native dialog in Tauri, file input in browser)
   const handleTriggerImport = async () => {
+    if (isBackupBusy) return;
+    setIsBackupBusy(true);
     try {
       const tauriResult = await pickAndReadJsonBackupInTauri();
       if (tauriResult === null) {
@@ -149,7 +161,7 @@ export const SettingsPage: React.FC = () => {
         return;
       }
       if (tauriResult.status === 'cancelled') return;
-      applyImportedBackupContent(tauriResult.content);
+      await applyImportedBackupContent(tauriResult.content);
     } catch (error) {
       console.error('Failed to import backup:', error);
       addToast({
@@ -157,6 +169,8 @@ export const SettingsPage: React.FC = () => {
         title: 'Import Failed',
         message: 'Could not read the selected backup file.',
       });
+    } finally {
+      setIsBackupBusy(false);
     }
   };
 
@@ -165,9 +179,14 @@ export const SettingsPage: React.FC = () => {
     const file = e.target.files?.[0];
     if (file) {
       const reader = new FileReader();
-      reader.onload = (event) => {
+      reader.onload = async (event) => {
         const content = event.target?.result as string;
-        applyImportedBackupContent(content);
+        setIsBackupBusy(true);
+        try {
+          await applyImportedBackupContent(content);
+        } finally {
+          setIsBackupBusy(false);
+        }
       };
       reader.readAsText(file);
       e.target.value = '';
@@ -187,7 +206,7 @@ export const SettingsPage: React.FC = () => {
             Configure enterprise profile, tax parameters, currency formatting, and document numbering.
           </p>
         </div>
-        <Button variant="primary" size="sm" onClick={handleSubmit}>
+        <Button variant="primary" size="sm" onClick={handleSubmit} disabled={isSaving} isLoading={isSaving}>
           Save Settings
         </Button>
       </div>
@@ -581,7 +600,11 @@ export const SettingsPage: React.FC = () => {
                 Data Storage & Supabase Cloud Readiness
               </h3>
               <p className="text-xs text-ink-secondary">
-                Current data persistence mode: <strong className="text-ink">Browser LocalStorage</strong>.
+                Current data persistence mode:{' '}
+                <strong className="text-ink">
+                  {persistenceBackend === 'sqlite' ? 'Local SQLite Database' : 'Browser LocalStorage'}
+                </strong>
+                .
               </p>
             </div>
           </div>
@@ -668,7 +691,7 @@ export const SettingsPage: React.FC = () => {
 
         {/* Save Button */}
         <div className="flex justify-end pt-4">
-          <Button variant="primary" size="md" type="submit">
+          <Button variant="primary" size="md" type="submit" disabled={isSaving} isLoading={isSaving}>
             Save All Preferences
           </Button>
         </div>

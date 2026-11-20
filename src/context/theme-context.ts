@@ -5,6 +5,7 @@ export interface ThemeContextValue {
   theme: ThemeMode;
   resolvedTheme: ResolvedTheme;
   setTheme: (theme: ThemeMode) => void;
+  hydrateTheme: (theme: ThemeMode) => void;
 }
 
 export const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);

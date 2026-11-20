@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { Button } from '../components/common/Button';
 import { Input } from '../components/common/Input';
@@ -8,7 +8,6 @@ import type { LineItem, Invoice, Client, InvoiceStatus } from '../types';
 import { calculateDocumentFinancials, calculateLineItemTotal, calculateInvoiceBalances } from '../utils/calculations';
 import { formatCurrency } from '../utils/formatters';
 import { generateId } from '../utils/idGenerator';
-import { StorageService } from '../services/storage';
 import {
   Plus,
   Trash2,
@@ -28,7 +27,6 @@ export const InvoiceFormPage: React.FC = () => {
     saveInvoice,
     saveClient,
     getNextInvoiceNumber,
-    commitInvoiceNumber,
     isInvoiceNumberTaken,
     openDocumentPreview,
     addToast,
@@ -53,10 +51,23 @@ export const InvoiceFormPage: React.FC = () => {
   const [newClientAddress, setNewClientAddress] = useState('');
 
   // Invoice Meta
+  const hasManuallyEditedNumberRef = useRef(false);
   const [invoiceNumber, setInvoiceNumber] = useState<string>(() => {
-    if (existingInvoice) return existingInvoice.invoiceNumber;
-    return getNextInvoiceNumber();
+    return existingInvoice ? existingInvoice.invoiceNumber : '';
   });
+
+  useEffect(() => {
+    if (isEditing) return;
+    let cancelled = false;
+    void getNextInvoiceNumber().then((nextNumber) => {
+      if (!cancelled && !hasManuallyEditedNumberRef.current) {
+        setInvoiceNumber(nextNumber);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isEditing, getNextInvoiceNumber]);
 
   const [quotationId, setQuotationId] = useState<string>(() => {
     const rawRef = existingInvoice?.quotationId?.trim();
@@ -126,6 +137,7 @@ export const InvoiceFormPage: React.FC = () => {
   );
 
   const [errorMsg, setErrorMsg] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Live recalculations
   const financials = calculateDocumentFinancials({
@@ -180,8 +192,9 @@ export const InvoiceFormPage: React.FC = () => {
     );
   };
 
-  const handleQuickAddClient = (e?: React.FormEvent) => {
+  const handleQuickAddClient = async (e?: React.FormEvent) => {
     e?.preventDefault();
+    if (isSubmitting) return;
     if (!newClientName.trim()) {
       const msg = 'Client name is required.';
       setErrorMsg(msg);
@@ -189,20 +202,26 @@ export const InvoiceFormPage: React.FC = () => {
       return;
     }
     setErrorMsg('');
-    const created = saveClient({
-      name: newClientName.trim(),
-      companyName: newClientCompany.trim() || undefined,
-      email: newClientEmail.trim() || `${newClientName.toLowerCase().replace(/\s+/g, '')}@example.com`,
-      phone: newClientPhone.trim(),
-      address: newClientAddress.trim(),
-    });
-    setSelectedClientId(created.id);
-    setIsAddingNewClient(false);
-    setNewClientName('');
-    setNewClientCompany('');
-    setNewClientEmail('');
-    setNewClientPhone('');
-    setNewClientAddress('');
+    setIsSubmitting(true);
+    try {
+      const created = await saveClient({
+        name: newClientName.trim(),
+        companyName: newClientCompany.trim() || undefined,
+        email: newClientEmail.trim() || `${newClientName.toLowerCase().replace(/\s+/g, '')}@example.com`,
+        phone: newClientPhone.trim(),
+        address: newClientAddress.trim(),
+      });
+      if (!created) return;
+      setSelectedClientId(created.id);
+      setIsAddingNewClient(false);
+      setNewClientName('');
+      setNewClientCompany('');
+      setNewClientEmail('');
+      setNewClientPhone('');
+      setNewClientAddress('');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const reportValidationError = (message: string) => {
@@ -229,139 +248,143 @@ export const InvoiceFormPage: React.FC = () => {
     });
   };
 
-  const handleSave = (viewAfterSave: boolean = false) => {
+  const handleSave = async (viewAfterSave: boolean = false) => {
+    if (isSubmitting) return;
     setErrorMsg('');
+    setIsSubmitting(true);
 
-    let clientToUse: Client | undefined = matchedClient;
+    try {
+      let clientToUse: Client | undefined = matchedClient;
 
-    if (isAddingNewClient) {
-      if (newClientName.trim()) {
-        clientToUse = saveClient({
-          name: newClientName.trim(),
-          companyName: newClientCompany.trim() || undefined,
-          email: newClientEmail.trim() || `${newClientName.toLowerCase().replace(/\s+/g, '')}@example.com`,
-          phone: newClientPhone.trim(),
-          address: newClientAddress.trim(),
-        });
-        setSelectedClientId(clientToUse.id);
-        setIsAddingNewClient(false);
-        setNewClientName('');
-        setNewClientCompany('');
-        setNewClientEmail('');
-        setNewClientPhone('');
-        setNewClientAddress('');
-      } else if (!clientToUse) {
-        reportValidationError('Please enter a client name or select an existing client.');
-        return;
-      }
-    }
-
-    if (!clientToUse) {
-      reportValidationError(
-        isEditing && existingInvoice?.clientSnapshot
-          ? 'The original client record was deleted. Please select an existing client or quick-add a client before saving.'
-          : 'Please select or add a client before saving.'
-      );
-      return;
-    }
-
-    if (items.length === 0 || items.some((item) => !item.description.trim())) {
-      reportValidationError('Please enter a description for all line items.');
-      return;
-    }
-
-    const finalInvoiceNumber =
-      invoiceNumber.trim() ||
-      (existingInvoice ? existingInvoice.invoiceNumber : getNextInvoiceNumber());
-
-    if (isInvoiceNumberTaken(finalInvoiceNumber, existingInvoice?.id)) {
-      reportValidationError(
-        `Invoice number "${finalInvoiceNumber}" already exists. Please enter a unique invoice number.`
-      );
-      return;
-    }
-
-    let resolvedQuotationId: string | undefined;
-    const rawQuotationRef = quotationId.trim();
-    if (rawQuotationRef) {
-      const matchedQuote = quotations.find(
-        (q) =>
-          q.id === rawQuotationRef ||
-          q.quotationNumber.trim().toLowerCase() === rawQuotationRef.toLowerCase()
-      );
-      if (!matchedQuote) {
-        reportValidationError('The selected quotation no longer exists. Please choose another quotation or clear the link.');
-        return;
+      if (isAddingNewClient) {
+        if (newClientName.trim()) {
+          const createdClient = await saveClient({
+            name: newClientName.trim(),
+            companyName: newClientCompany.trim() || undefined,
+            email: newClientEmail.trim() || `${newClientName.toLowerCase().replace(/\s+/g, '')}@example.com`,
+            phone: newClientPhone.trim(),
+            address: newClientAddress.trim(),
+          });
+          if (!createdClient) return;
+          clientToUse = createdClient;
+          setSelectedClientId(createdClient.id);
+          setIsAddingNewClient(false);
+          setNewClientName('');
+          setNewClientCompany('');
+          setNewClientEmail('');
+          setNewClientPhone('');
+          setNewClientAddress('');
+        } else if (!clientToUse) {
+          reportValidationError('Please enter a client name or select an existing client.');
+          return;
+        }
       }
 
-      const isAlreadyLinkedToCurrent = Boolean(
-        existingInvoice &&
-          ((existingInvoice.quotationId &&
-            (existingInvoice.quotationId === matchedQuote.id ||
-              existingInvoice.quotationId.trim().toLowerCase() === matchedQuote.quotationNumber.trim().toLowerCase())) ||
-            matchedQuote.convertedInvoiceId === existingInvoice.id)
-      );
-
-      if (matchedQuote.status === 'declined' && !isAlreadyLinkedToCurrent) {
+      if (!clientToUse) {
         reportValidationError(
-          `Quotation ${matchedQuote.quotationNumber} is declined and cannot be linked to an invoice.`
+          isEditing && existingInvoice?.clientSnapshot
+            ? 'The original client record was deleted. Please select an existing client or quick-add a client before saving.'
+            : 'Please select or add a client before saving.'
         );
         return;
       }
 
-      const conflictingInvoice = findLinkedInvoiceForQuotation(matchedQuote.id, matchedQuote.quotationNumber);
-      if (conflictingInvoice) {
+      if (items.length === 0 || items.some((item) => !item.description.trim())) {
+        reportValidationError('Please enter a description for all line items.');
+        return;
+      }
+
+      const finalInvoiceNumber =
+        invoiceNumber.trim() ||
+        (existingInvoice ? existingInvoice.invoiceNumber : await getNextInvoiceNumber());
+
+      if (await isInvoiceNumberTaken(finalInvoiceNumber, existingInvoice?.id)) {
         reportValidationError(
-          `Quotation ${matchedQuote.quotationNumber} is already linked to Invoice ${conflictingInvoice.invoiceNumber}.`
+          `Invoice number "${finalInvoiceNumber}" already exists. Please enter a unique invoice number.`
         );
         return;
       }
-      resolvedQuotationId = matchedQuote.id;
-    }
 
-    const invoiceToSave: Invoice = {
-      id: existingInvoice?.id || generateId('inv'),
-      invoiceNumber: finalInvoiceNumber,
-      quotationId: resolvedQuotationId,
-      clientId: clientToUse.id,
-      clientSnapshot: clientToUse,
-      businessSnapshot: businessProfile,
-      issueDate,
-      dueDate,
-      currency,
-      currencySymbol,
-      items,
-      subtotal: financials.subtotal,
-      discountType,
-      discountValue: Number(discountValue) || 0,
-      discountAmount: financials.discountAmount,
-      taxName: isTaxEnabled ? taxName : 'None',
-      taxRate: isTaxEnabled ? Number(taxRate) : 0,
-      taxAmount: financials.taxAmount,
-      grandTotal: financials.grandTotal,
-      amountPaid,
-      outstandingBalance,
-      status,
-      notes: notes.trim() || undefined,
-      terms: terms.trim() || undefined,
-      payments: currentPayments,
-      createdAt: existingInvoice?.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
+      let resolvedQuotationId: string | undefined;
+      const rawQuotationRef = quotationId.trim();
+      if (rawQuotationRef) {
+        const matchedQuote = quotations.find(
+          (q) =>
+            q.id === rawQuotationRef ||
+            q.quotationNumber.trim().toLowerCase() === rawQuotationRef.toLowerCase()
+        );
+        if (!matchedQuote) {
+          reportValidationError('The selected quotation no longer exists. Please choose another quotation or clear the link.');
+          return;
+        }
 
-    const saved = saveInvoice(invoiceToSave);
-    if (!saved) {
-      return;
-    }
+        const isAlreadyLinkedToCurrent = Boolean(
+          existingInvoice &&
+            ((existingInvoice.quotationId &&
+              (existingInvoice.quotationId === matchedQuote.id ||
+                existingInvoice.quotationId.trim().toLowerCase() === matchedQuote.quotationNumber.trim().toLowerCase())) ||
+              matchedQuote.convertedInvoiceId === existingInvoice.id)
+        );
 
-    if (!isEditing && StorageService.lastWritePersisted) {
-      commitInvoiceNumber(saved.invoiceNumber);
-    }
+        if (matchedQuote.status === 'declined' && !isAlreadyLinkedToCurrent) {
+          reportValidationError(
+            `Quotation ${matchedQuote.quotationNumber} is declined and cannot be linked to an invoice.`
+          );
+          return;
+        }
 
-    if (viewAfterSave) {
-      openDocumentPreview('invoice', saved);
+        const conflictingInvoice = findLinkedInvoiceForQuotation(matchedQuote.id, matchedQuote.quotationNumber);
+        if (conflictingInvoice) {
+          reportValidationError(
+            `Quotation ${matchedQuote.quotationNumber} is already linked to Invoice ${conflictingInvoice.invoiceNumber}.`
+          );
+          return;
+        }
+        resolvedQuotationId = matchedQuote.id;
+      }
+
+      const invoiceToSave: Invoice = {
+        id: existingInvoice?.id || generateId('inv'),
+        invoiceNumber: finalInvoiceNumber,
+        quotationId: resolvedQuotationId,
+        clientId: clientToUse.id,
+        clientSnapshot: clientToUse,
+        businessSnapshot: businessProfile,
+        issueDate,
+        dueDate,
+        currency,
+        currencySymbol,
+        items,
+        subtotal: financials.subtotal,
+        discountType,
+        discountValue: Number(discountValue) || 0,
+        discountAmount: financials.discountAmount,
+        taxName: isTaxEnabled ? taxName : 'None',
+        taxRate: isTaxEnabled ? Number(taxRate) : 0,
+        taxAmount: financials.taxAmount,
+        grandTotal: financials.grandTotal,
+        amountPaid,
+        outstandingBalance,
+        status,
+        notes: notes.trim() || undefined,
+        terms: terms.trim() || undefined,
+        payments: currentPayments,
+        createdAt: existingInvoice?.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      const saved = await saveInvoice(invoiceToSave, { commitNumber: !isEditing });
+      if (!saved) {
+        return;
+      }
+
+      if (viewAfterSave) {
+        openDocumentPreview('invoice', saved);
+      }
+      setActiveView('invoices');
+    } finally {
+      setIsSubmitting(false);
     }
-    setActiveView('invoices');
   };
 
   return (
@@ -389,15 +412,17 @@ export const InvoiceFormPage: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          <Button type="button" variant="secondary" size="sm" onClick={() => handleSave(false)}>
+          <Button type="button" variant="secondary" size="sm" onClick={() => void handleSave(false)} disabled={isSubmitting}>
             Save Draft
           </Button>
           <Button
             type="button"
             variant="primary"
             size="sm"
-            onClick={() => handleSave(true)}
+            onClick={() => void handleSave(true)}
             leftIcon={<Eye className="w-3.5 h-3.5" />}
+            disabled={isSubmitting}
+            isLoading={isSubmitting}
           >
             Save & Inspect
           </Button>
@@ -503,10 +528,10 @@ export const InvoiceFormPage: React.FC = () => {
                   placeholder="Street, City, Namibia"
                 />
                 <div className="flex justify-end gap-2 pt-1">
-                  <Button type="button" variant="secondary" size="sm" onClick={() => setIsAddingNewClient(false)}>
+                  <Button type="button" variant="secondary" size="sm" onClick={() => setIsAddingNewClient(false)} disabled={isSubmitting}>
                     Cancel
                   </Button>
-                  <Button type="button" variant="primary" size="sm" onClick={() => handleQuickAddClient()}>
+                  <Button type="button" variant="primary" size="sm" onClick={() => void handleQuickAddClient()} disabled={isSubmitting} isLoading={isSubmitting}>
                     Save & Select
                   </Button>
                 </div>
@@ -672,7 +697,10 @@ export const InvoiceFormPage: React.FC = () => {
             <Input
               label="Invoice Number"
               value={invoiceNumber}
-              onChange={(e) => setInvoiceNumber(e.target.value)}
+              onChange={(e) => {
+                hasManuallyEditedNumberRef.current = true;
+                setInvoiceNumber(e.target.value);
+              }}
               placeholder={existingInvoice ? existingInvoice.invoiceNumber : 'Auto-assigned if blank'}
               helperText={
                 isEditing
@@ -882,7 +910,9 @@ export const InvoiceFormPage: React.FC = () => {
                 variant="primary"
                 size="md"
                 className="w-full"
-                onClick={() => handleSave(true)}
+                onClick={() => void handleSave(true)}
+                disabled={isSubmitting}
+                isLoading={isSubmitting}
               >
                 Save & Preview Invoice
               </Button>

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { Button } from '../components/common/Button';
 import { Input } from '../components/common/Input';
@@ -8,7 +8,6 @@ import type { LineItem, Quotation, Client, QuotationStatus } from '../types';
 import { calculateDocumentFinancials, calculateLineItemTotal } from '../utils/calculations';
 import { formatCurrency } from '../utils/formatters';
 import { generateId } from '../utils/idGenerator';
-import { StorageService } from '../services/storage';
 import {
   Plus,
   Trash2,
@@ -27,7 +26,6 @@ export const QuotationFormPage: React.FC = () => {
     saveQuotation,
     saveClient,
     getNextQuoteNumber,
-    commitQuoteNumber,
     isQuotationNumberTaken,
     openDocumentPreview,
     addToast,
@@ -52,10 +50,23 @@ export const QuotationFormPage: React.FC = () => {
   const [newClientAddress, setNewClientAddress] = useState('');
 
   // Quotation Meta
+  const hasManuallyEditedNumberRef = useRef(false);
   const [quotationNumber, setQuotationNumber] = useState<string>(() => {
-    if (existingQuote) return existingQuote.quotationNumber;
-    return getNextQuoteNumber();
+    return existingQuote ? existingQuote.quotationNumber : '';
   });
+
+  useEffect(() => {
+    if (isEditing) return;
+    let cancelled = false;
+    void getNextQuoteNumber().then((nextNumber) => {
+      if (!cancelled && !hasManuallyEditedNumberRef.current) {
+        setQuotationNumber(nextNumber);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isEditing, getNextQuoteNumber]);
 
   const [issueDate, setIssueDate] = useState<string>(() => {
     return existingQuote?.issueDate || new Date().toISOString().split('T')[0];
@@ -116,6 +127,7 @@ export const QuotationFormPage: React.FC = () => {
   );
 
   const [errorMsg, setErrorMsg] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Live recalculations
   const financials = calculateDocumentFinancials({
@@ -167,8 +179,9 @@ export const QuotationFormPage: React.FC = () => {
     );
   };
 
-  const handleQuickAddClient = (e?: React.FormEvent) => {
+  const handleQuickAddClient = async (e?: React.FormEvent) => {
     e?.preventDefault();
+    if (isSubmitting) return;
     if (!newClientName.trim()) {
       const msg = 'Client name is required.';
       setErrorMsg(msg);
@@ -176,20 +189,26 @@ export const QuotationFormPage: React.FC = () => {
       return;
     }
     setErrorMsg('');
-    const created = saveClient({
-      name: newClientName.trim(),
-      companyName: newClientCompany.trim() || undefined,
-      email: newClientEmail.trim() || `${newClientName.toLowerCase().replace(/\s+/g, '')}@example.com`,
-      phone: newClientPhone.trim(),
-      address: newClientAddress.trim(),
-    });
-    setSelectedClientId(created.id);
-    setIsAddingNewClient(false);
-    setNewClientName('');
-    setNewClientCompany('');
-    setNewClientEmail('');
-    setNewClientPhone('');
-    setNewClientAddress('');
+    setIsSubmitting(true);
+    try {
+      const created = await saveClient({
+        name: newClientName.trim(),
+        companyName: newClientCompany.trim() || undefined,
+        email: newClientEmail.trim() || `${newClientName.toLowerCase().replace(/\s+/g, '')}@example.com`,
+        phone: newClientPhone.trim(),
+        address: newClientAddress.trim(),
+      });
+      if (!created) return;
+      setSelectedClientId(created.id);
+      setIsAddingNewClient(false);
+      setNewClientName('');
+      setNewClientCompany('');
+      setNewClientEmail('');
+      setNewClientPhone('');
+      setNewClientAddress('');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const reportValidationError = (message: string) => {
@@ -202,99 +221,103 @@ export const QuotationFormPage: React.FC = () => {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const handleSave = (viewAfterSave: boolean = false) => {
+  const handleSave = async (viewAfterSave: boolean = false) => {
+    if (isSubmitting) return;
     setErrorMsg('');
+    setIsSubmitting(true);
 
-    let clientToUse: Client | undefined = matchedClient;
+    try {
+      let clientToUse: Client | undefined = matchedClient;
 
-    if (isAddingNewClient) {
-      if (newClientName.trim()) {
-        clientToUse = saveClient({
-          name: newClientName.trim(),
-          companyName: newClientCompany.trim() || undefined,
-          email: newClientEmail.trim() || `${newClientName.toLowerCase().replace(/\s+/g, '')}@example.com`,
-          phone: newClientPhone.trim(),
-          address: newClientAddress.trim(),
-        });
-        setSelectedClientId(clientToUse.id);
-        setIsAddingNewClient(false);
-        setNewClientName('');
-        setNewClientCompany('');
-        setNewClientEmail('');
-        setNewClientPhone('');
-        setNewClientAddress('');
-      } else if (!clientToUse) {
-        reportValidationError('Please enter a client name or select an existing client.');
+      if (isAddingNewClient) {
+        if (newClientName.trim()) {
+          const createdClient = await saveClient({
+            name: newClientName.trim(),
+            companyName: newClientCompany.trim() || undefined,
+            email: newClientEmail.trim() || `${newClientName.toLowerCase().replace(/\s+/g, '')}@example.com`,
+            phone: newClientPhone.trim(),
+            address: newClientAddress.trim(),
+          });
+          if (!createdClient) return;
+          clientToUse = createdClient;
+          setSelectedClientId(createdClient.id);
+          setIsAddingNewClient(false);
+          setNewClientName('');
+          setNewClientCompany('');
+          setNewClientEmail('');
+          setNewClientPhone('');
+          setNewClientAddress('');
+        } else if (!clientToUse) {
+          reportValidationError('Please enter a client name or select an existing client.');
+          return;
+        }
+      }
+
+      if (!clientToUse) {
+        reportValidationError(
+          isEditing && existingQuote?.clientSnapshot
+            ? 'The original client record was deleted. Please select an existing client or quick-add a client before saving.'
+            : 'Please select or add a client before saving.'
+        );
         return;
       }
+
+      if (items.length === 0 || items.some((item) => !item.description.trim())) {
+        reportValidationError('Please enter a description for all line items.');
+        return;
+      }
+
+      const finalQuoteNumber =
+        quotationNumber.trim() ||
+        (existingQuote ? existingQuote.quotationNumber : await getNextQuoteNumber());
+
+      if (await isQuotationNumberTaken(finalQuoteNumber, existingQuote?.id)) {
+        reportValidationError(
+          `Quotation number "${finalQuoteNumber}" already exists. Please enter a unique quotation number.`
+        );
+        return;
+      }
+
+      const quoteToSave: Quotation = {
+        id: existingQuote?.id || generateId('quo'),
+        quotationNumber: finalQuoteNumber,
+        clientId: clientToUse.id,
+        clientSnapshot: clientToUse,
+        businessSnapshot: businessProfile,
+        issueDate,
+        expiryDate,
+        currency,
+        currencySymbol,
+        items,
+        subtotal: financials.subtotal,
+        discountType,
+        discountValue: Number(discountValue) || 0,
+        discountAmount: financials.discountAmount,
+        taxName: isTaxEnabled ? taxName : 'None',
+        taxRate: isTaxEnabled ? Number(taxRate) || 0 : 0,
+        taxAmount: financials.taxAmount,
+        grandTotal: financials.grandTotal,
+        status,
+        notes: notes.trim() || undefined,
+        terms: terms.trim() || undefined,
+        convertedInvoiceId: existingQuote?.convertedInvoiceId,
+        preConversionStatus: existingQuote?.preConversionStatus,
+        createdAt: existingQuote?.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      const saved = await saveQuotation(quoteToSave, { commitNumber: !isEditing });
+      if (!saved) {
+        return;
+      }
+
+      if (viewAfterSave) {
+        openDocumentPreview('quote', saved);
+      }
+      setActiveView('quotations');
+    } finally {
+      setIsSubmitting(false);
     }
-
-    if (!clientToUse) {
-      reportValidationError(
-        isEditing && existingQuote?.clientSnapshot
-          ? 'The original client record was deleted. Please select an existing client or quick-add a client before saving.'
-          : 'Please select or add a client before saving.'
-      );
-      return;
-    }
-
-    if (items.length === 0 || items.some((item) => !item.description.trim())) {
-      reportValidationError('Please enter a description for all line items.');
-      return;
-    }
-
-    const finalQuoteNumber =
-      quotationNumber.trim() ||
-      (existingQuote ? existingQuote.quotationNumber : getNextQuoteNumber());
-
-    if (isQuotationNumberTaken(finalQuoteNumber, existingQuote?.id)) {
-      reportValidationError(
-        `Quotation number "${finalQuoteNumber}" already exists. Please enter a unique quotation number.`
-      );
-      return;
-    }
-
-    const quoteToSave: Quotation = {
-      id: existingQuote?.id || generateId('quo'),
-      quotationNumber: finalQuoteNumber,
-      clientId: clientToUse.id,
-      clientSnapshot: clientToUse,
-      businessSnapshot: businessProfile,
-      issueDate,
-      expiryDate,
-      currency,
-      currencySymbol,
-      items,
-      subtotal: financials.subtotal,
-      discountType,
-      discountValue: Number(discountValue) || 0,
-      discountAmount: financials.discountAmount,
-      taxName: isTaxEnabled ? taxName : 'None',
-      taxRate: isTaxEnabled ? Number(taxRate) || 0 : 0,
-      taxAmount: financials.taxAmount,
-      grandTotal: financials.grandTotal,
-      status,
-      notes: notes.trim() || undefined,
-      terms: terms.trim() || undefined,
-      convertedInvoiceId: existingQuote?.convertedInvoiceId,
-      preConversionStatus: existingQuote?.preConversionStatus,
-      createdAt: existingQuote?.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    const saved = saveQuotation(quoteToSave);
-    if (!saved) {
-      return;
-    }
-
-    if (!isEditing && StorageService.lastWritePersisted) {
-      commitQuoteNumber(saved.quotationNumber);
-    }
-
-    if (viewAfterSave) {
-      openDocumentPreview('quote', saved);
-    }
-    setActiveView('quotations');
   };
 
   return (
@@ -322,15 +345,17 @@ export const QuotationFormPage: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          <Button type="button" variant="secondary" size="sm" onClick={() => handleSave(false)}>
+          <Button type="button" variant="secondary" size="sm" onClick={() => void handleSave(false)} disabled={isSubmitting}>
             Save Draft
           </Button>
           <Button
             type="button"
             variant="primary"
             size="sm"
-            onClick={() => handleSave(true)}
+            onClick={() => void handleSave(true)}
             leftIcon={<Eye className="w-3.5 h-3.5" />}
+            disabled={isSubmitting}
+            isLoading={isSubmitting}
           >
             Save & Inspect
           </Button>
@@ -440,10 +465,10 @@ export const QuotationFormPage: React.FC = () => {
                   placeholder="Street, City, Namibia"
                 />
                 <div className="flex justify-end gap-2 pt-1">
-                  <Button type="button" variant="secondary" size="sm" onClick={() => setIsAddingNewClient(false)}>
+                  <Button type="button" variant="secondary" size="sm" onClick={() => setIsAddingNewClient(false)} disabled={isSubmitting}>
                     Cancel
                   </Button>
-                  <Button type="button" variant="primary" size="sm" onClick={() => handleQuickAddClient()}>
+                  <Button type="button" variant="primary" size="sm" onClick={() => void handleQuickAddClient()} disabled={isSubmitting} isLoading={isSubmitting}>
                     Save & Select
                   </Button>
                 </div>
@@ -609,7 +634,10 @@ export const QuotationFormPage: React.FC = () => {
             <Input
               label="Quotation Number"
               value={quotationNumber}
-              onChange={(e) => setQuotationNumber(e.target.value)}
+              onChange={(e) => {
+                hasManuallyEditedNumberRef.current = true;
+                setQuotationNumber(e.target.value);
+              }}
               placeholder={existingQuote ? existingQuote.quotationNumber : 'Auto-assigned if blank'}
               helperText={
                 isEditing
@@ -775,7 +803,9 @@ export const QuotationFormPage: React.FC = () => {
                 variant="primary"
                 size="md"
                 className="w-full"
-                onClick={() => handleSave(true)}
+                onClick={() => void handleSave(true)}
+                disabled={isSubmitting}
+                isLoading={isSubmitting}
               >
                 Save & Preview Quotation
               </Button>

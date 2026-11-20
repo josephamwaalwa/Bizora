@@ -34,6 +34,7 @@ export const QuotationsPage: React.FC = () => {
   const [localSearch, setLocalSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | QuotationStatus>('all');
   const [sortBy, setSortBy] = useState<'date-desc' | 'date-asc' | 'amount-desc' | 'number'>('date-desc');
+  const [busyQuotationId, setBusyQuotationId] = useState<string | null>(null);
 
   const currency = businessProfile.defaultCurrency;
   const symbol = businessProfile.currencySymbol;
@@ -74,13 +75,35 @@ export const QuotationsPage: React.FC = () => {
   const acceptedCount = quotations.filter((q) => q.status === 'accepted').length;
   const pendingCount = quotations.filter((q) => q.status === 'sent' || q.status === 'draft').length;
 
+  const handleConvert = async (id: string) => {
+    if (busyQuotationId) return;
+    setBusyQuotationId(id);
+    try {
+      await convertQuotationToInvoice(id);
+    } finally {
+      setBusyQuotationId(null);
+    }
+  };
+
+  const handleDuplicate = async (id: string) => {
+    if (busyQuotationId) return;
+    setBusyQuotationId(id);
+    try {
+      await duplicateQuotation(id);
+    } finally {
+      setBusyQuotationId(null);
+    }
+  };
+
   const handleDelete = (id: string, quoteNumber: string) => {
     showConfirmDialog({
       title: `Delete Quotation ${quoteNumber}?`,
       message: 'Are you sure you want to delete this quotation? This action cannot be undone.',
       confirmLabel: 'Delete Quotation',
       isDestructive: true,
-      onConfirm: () => deleteQuotation(id),
+      onConfirm: async () => {
+        await deleteQuotation(id);
+      },
     });
   };
 
@@ -241,8 +264,9 @@ export const QuotationsPage: React.FC = () => {
                       <div className="flex items-center justify-end gap-1">
                         {quo.status !== 'declined' && !quo.convertedInvoiceId && (
                           <button
-                            onClick={() => convertQuotationToInvoice(quo.id)}
-                            className="p-2 text-ink-muted hover:text-ink"
+                            disabled={busyQuotationId === quo.id}
+                            onClick={() => void handleConvert(quo.id)}
+                            className="p-2 text-ink-muted hover:text-ink disabled:opacity-50"
                             title="Convert to Invoice"
                           >
                             <CheckCircle2 className="h-4 w-4" />
@@ -275,8 +299,9 @@ export const QuotationsPage: React.FC = () => {
                         </button>
 
                         <button
-                          onClick={() => duplicateQuotation(quo.id)}
-                          className="p-2 text-ink-muted hover:text-ink"
+                          disabled={busyQuotationId === quo.id}
+                          onClick={() => void handleDuplicate(quo.id)}
+                          className="p-2 text-ink-muted hover:text-ink disabled:opacity-50"
                           title="Duplicate Quotation"
                         >
                           <Copy className="h-4 w-4" />

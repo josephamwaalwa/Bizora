@@ -1,7 +1,9 @@
 (function () {
   var STORAGE_KEY = 'bizora_theme_preference_v1';
   try {
-    var stored = localStorage.getItem(STORAGE_KEY);
+    var isDesktopTauri =
+      typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+    var stored = isDesktopTauri ? null : localStorage.getItem(STORAGE_KEY);
     var mode = stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'system';
     var prefersDark =
       typeof window !== 'undefined' &&

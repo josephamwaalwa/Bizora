@@ -60,13 +60,21 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     applyThemeToDocument(resolveTheme(nextTheme));
   }, []);
 
+  const hydrateTheme = useCallback((nextTheme: ThemeMode) => {
+    if (!isValidThemeMode(nextTheme)) return;
+    saveStoredTheme(nextTheme);
+    setThemeState(nextTheme);
+    applyThemeToDocument(resolveTheme(nextTheme));
+  }, []);
+
   const value = useMemo(
     () => ({
       theme,
       resolvedTheme,
       setTheme,
+      hydrateTheme,
     }),
-    [theme, resolvedTheme, setTheme]
+    [theme, resolvedTheme, setTheme, hydrateTheme]
   );
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;

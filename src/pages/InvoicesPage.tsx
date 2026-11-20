@@ -33,6 +33,7 @@ export const InvoicesPage: React.FC = () => {
   const [localSearch, setLocalSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | InvoiceStatus>('all');
   const [sortBy, setSortBy] = useState<'date-desc' | 'date-asc' | 'amount-desc' | 'balance-desc' | 'number'>('date-desc');
+  const [busyInvoiceId, setBusyInvoiceId] = useState<string | null>(null);
 
   const currency = businessProfile.defaultCurrency;
   const symbol = businessProfile.currencySymbol;
@@ -77,13 +78,25 @@ export const InvoicesPage: React.FC = () => {
   const totalOutstanding = invoices.reduce((sum, i) => sum + i.outstandingBalance, 0);
   const overdueCount = invoices.filter((i) => i.status === 'overdue').length;
 
+  const handleDuplicate = async (id: string) => {
+    if (busyInvoiceId) return;
+    setBusyInvoiceId(id);
+    try {
+      await duplicateInvoice(id);
+    } finally {
+      setBusyInvoiceId(null);
+    }
+  };
+
   const handleDelete = (id: string, invoiceNumber: string) => {
     showConfirmDialog({
       title: `Delete Invoice ${invoiceNumber}?`,
       message: 'Are you sure you want to delete this invoice? Recorded payments and balance histories will also be permanently deleted.',
       confirmLabel: 'Delete Invoice',
       isDestructive: true,
-      onConfirm: () => deleteInvoice(id),
+      onConfirm: async () => {
+        await deleteInvoice(id);
+      },
     });
   };
 
@@ -286,8 +299,9 @@ export const InvoicesPage: React.FC = () => {
                         </button>
 
                         <button
-                          onClick={() => duplicateInvoice(inv.id)}
-                          className="p-1 text-ink-muted hover:text-ink transition-colors rounded"
+                          disabled={busyInvoiceId === inv.id}
+                          onClick={() => void handleDuplicate(inv.id)}
+                          className="p-1 text-ink-muted hover:text-ink transition-colors rounded disabled:opacity-50"
                           title="Duplicate Invoice"
                         >
                           <Copy className="w-3.5 h-3.5" />

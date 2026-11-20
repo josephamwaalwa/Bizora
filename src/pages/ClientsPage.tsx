@@ -47,6 +47,7 @@ export const ClientsPage: React.FC = () => {
   const [vatNumber, setVatNumber] = useState('');
   const [notes, setNotes] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const currency = businessProfile.defaultCurrency;
   const symbol = businessProfile.currencySymbol;
@@ -92,8 +93,9 @@ export const ClientsPage: React.FC = () => {
     setIsModalOpen(true);
   };
 
-  const handleSaveClient = (e: React.FormEvent) => {
+  const handleSaveClient = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     if (!name.trim()) {
       setErrorMsg('Client full name or primary contact name is required.');
       return;
@@ -103,18 +105,25 @@ export const ClientsPage: React.FC = () => {
       return;
     }
 
-    saveClient({
-      id: editingClient?.id,
-      name: name.trim(),
-      companyName: companyName.trim() || undefined,
-      email: email.trim(),
-      phone: phone.trim(),
-      address: address.trim(),
-      vatNumber: vatNumber.trim() || undefined,
-      notes: notes.trim() || undefined,
-    });
+    setIsSubmitting(true);
+    try {
+      const saved = await saveClient({
+        id: editingClient?.id,
+        name: name.trim(),
+        companyName: companyName.trim() || undefined,
+        email: email.trim(),
+        phone: phone.trim(),
+        address: address.trim(),
+        vatNumber: vatNumber.trim() || undefined,
+        notes: notes.trim() || undefined,
+      });
 
-    setIsModalOpen(false);
+      if (saved) {
+        setIsModalOpen(false);
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleDelete = (id: string, clientName: string) => {
@@ -350,10 +359,10 @@ export const ClientsPage: React.FC = () => {
           />
 
           <div className="flex items-center justify-end gap-2 pt-3 border-t border-line">
-            <Button variant="secondary" size="sm" type="button" onClick={() => setIsModalOpen(false)}>
+            <Button variant="secondary" size="sm" type="button" onClick={() => setIsModalOpen(false)} disabled={isSubmitting}>
               Cancel
             </Button>
-            <Button variant="primary" size="sm" type="submit">
+            <Button variant="primary" size="sm" type="submit" disabled={isSubmitting} isLoading={isSubmitting}>
               {editingClient ? 'Save Changes' : 'Create Client'}
             </Button>
           </div>

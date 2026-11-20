@@ -21,11 +21,13 @@ export const RecordPaymentModal: React.FC = () => {
   const [reference, setReference] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
   const [error, setError] = useState<string>('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   if (!invoice) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     const numAmount = Number(amount);
     if (!numAmount || numAmount <= 0) {
       setError('Please enter a valid payment amount greater than zero.');
@@ -36,13 +38,18 @@ export const RecordPaymentModal: React.FC = () => {
       return;
     }
 
-    recordPayment(invoice.id, {
-      amount: numAmount,
-      paymentDate,
-      paymentMethod,
-      reference: reference.trim() || undefined,
-      notes: notes.trim() || undefined,
-    });
+    setIsSubmitting(true);
+    try {
+      await recordPayment(invoice.id, {
+        amount: numAmount,
+        paymentDate,
+        paymentMethod,
+        reference: reference.trim() || undefined,
+        notes: notes.trim() || undefined,
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -132,10 +139,10 @@ export const RecordPaymentModal: React.FC = () => {
         />
 
         <div className="flex items-center justify-end gap-2 pt-3 border-t border-line">
-          <Button variant="secondary" size="sm" type="button" onClick={closePaymentModal}>
+          <Button variant="secondary" size="sm" type="button" onClick={closePaymentModal} disabled={isSubmitting}>
             Cancel
           </Button>
-          <Button variant="primary" size="sm" type="submit">
+          <Button variant="primary" size="sm" type="submit" disabled={isSubmitting} isLoading={isSubmitting}>
             Confirm Payment
           </Button>
         </div>

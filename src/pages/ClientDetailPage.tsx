@@ -31,6 +31,7 @@ export const ClientDetailPage: React.FC = () => {
 
   const client = clients.find((c) => c.id === activeEntityId);
   const [activeTab, setActiveTab] = useState<'invoices' | 'quotations'>('invoices');
+  const [convertingQuoteId, setConvertingQuoteId] = useState<string | null>(null);
 
   const currency = businessProfile.defaultCurrency;
   const symbol = businessProfile.currencySymbol;
@@ -349,8 +350,15 @@ export const ClientDetailPage: React.FC = () => {
                         <div className="flex items-center justify-end gap-1">
                           {quo.status !== 'declined' && !quo.convertedInvoiceId && (
                             <button
-                              onClick={() => convertQuotationToInvoice(quo.id)}
-                              className="p-1 text-ink-secondary hover:text-teal-700 dark:hover:text-teal-400 transition-colors rounded"
+                              disabled={convertingQuoteId === quo.id}
+                              onClick={() => {
+                                if (convertingQuoteId) return;
+                                setConvertingQuoteId(quo.id);
+                                void convertQuotationToInvoice(quo.id).finally(() => {
+                                  setConvertingQuoteId(null);
+                                });
+                              }}
+                              className="p-1 text-ink-secondary hover:text-teal-700 dark:hover:text-teal-400 transition-colors rounded disabled:opacity-50"
                               title="Convert to Invoice"
                             >
                               <CheckCircle2 className="w-3.5 h-3.5" />

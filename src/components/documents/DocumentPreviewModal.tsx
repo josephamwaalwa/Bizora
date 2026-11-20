@@ -33,6 +33,7 @@ export const DocumentPreviewModal: React.FC = () => {
   } = useApp();
 
   const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const [isMutating, setIsMutating] = useState(false);
 
   if (!previewDocument) return null;
 
@@ -108,19 +109,29 @@ export const DocumentPreviewModal: React.FC = () => {
     }
   };
 
-  const handleDuplicate = () => {
-    if (isInvoice && invoice) {
-      const dup = duplicateInvoice(invoice.id);
-      if (dup) closeDocumentPreview();
-    } else if (quote) {
-      const dup = duplicateQuotation(quote.id);
-      if (dup) closeDocumentPreview();
+  const handleDuplicate = async () => {
+    if (isMutating) return;
+    setIsMutating(true);
+    try {
+      if (isInvoice && invoice) {
+        const dup = await duplicateInvoice(invoice.id);
+        if (dup) closeDocumentPreview();
+      } else if (quote) {
+        const dup = await duplicateQuotation(quote.id);
+        if (dup) closeDocumentPreview();
+      }
+    } finally {
+      setIsMutating(false);
     }
   };
 
-  const handleConvertToInvoice = () => {
-    if (quote) {
-      convertQuotationToInvoice(quote.id);
+  const handleConvertToInvoice = async () => {
+    if (isMutating || !quote) return;
+    setIsMutating(true);
+    try {
+      await convertQuotationToInvoice(quote.id);
+    } finally {
+      setIsMutating(false);
     }
   };
 
@@ -151,8 +162,9 @@ export const DocumentPreviewModal: React.FC = () => {
             {isInvoice ? (
               <select
                 value={invoice?.status}
-                onChange={(e) => updateInvoiceStatus(invoice!.id, e.target.value as InvoiceStatus)}
-                className="bg-transparent text-xs font-semibold text-white focus:outline-none cursor-pointer"
+                disabled={isMutating}
+                onChange={(e) => void updateInvoiceStatus(invoice!.id, e.target.value as InvoiceStatus)}
+                className="bg-transparent text-xs font-semibold text-white focus:outline-none cursor-pointer disabled:opacity-60"
               >
                 <option value="draft" className="bg-slate-900 text-white">Draft</option>
                 <option value="sent" className="bg-slate-900 text-white">Sent</option>
@@ -163,8 +175,9 @@ export const DocumentPreviewModal: React.FC = () => {
             ) : (
               <select
                 value={quote?.status}
-                onChange={(e) => updateQuotationStatus(quote!.id, e.target.value as QuotationStatus)}
-                className="bg-transparent text-xs font-semibold text-white focus:outline-none cursor-pointer"
+                disabled={isMutating}
+                onChange={(e) => void updateQuotationStatus(quote!.id, e.target.value as QuotationStatus)}
+                className="bg-transparent text-xs font-semibold text-white focus:outline-none cursor-pointer disabled:opacity-60"
               >
                 <option value="draft" className="bg-slate-900 text-white">Draft</option>
                 <option value="sent" className="bg-slate-900 text-white">Sent</option>
@@ -182,6 +195,7 @@ export const DocumentPreviewModal: React.FC = () => {
               size="sm"
               leftIcon={<ArrowRight className="w-3.5 h-3.5 text-teal-600" />}
               onClick={handleConvertToInvoice}
+              disabled={isMutating}
             >
               Convert to Invoice
             </Button>
@@ -221,6 +235,8 @@ export const DocumentPreviewModal: React.FC = () => {
             size="sm"
             leftIcon={<Copy className="w-3.5 h-3.5" />}
             onClick={handleDuplicate}
+            disabled={isMutating}
+            isLoading={isMutating}
           >
             Duplicate
           </Button>

@@ -961,6 +961,27 @@ export interface MigrationResultDto {
   completedAt: string;
 }
 
+export interface ReplaceDesktopWorkspaceInput {
+  source?: string | null;
+  localProfile: CreateLocalProfileInput;
+  business: CreateBusinessInput;
+  assets: CreateBusinessAssetInput[];
+  clients: CreateClientInput[];
+  quotations: CreateQuotationInput[];
+  invoices: CreateInvoiceInput[];
+  payments: CreatePaymentInput[];
+  activityLogs: CreateActivityLogInput[];
+  settings: SaveAppSettingInput[];
+}
+
+export interface WorkspaceLifecycleResultDto {
+  migrationState: MigrationState;
+  businessId: string | null;
+  localProfileId: string | null;
+  counts: MigrationCountsDto;
+  completedAt: string;
+}
+
 function normalizeCommandError(err: unknown): DatabaseCommandError {
   if (err instanceof DatabaseCommandError) {
     return err;
@@ -1226,6 +1247,35 @@ export function migrateLegacyWorkspace(
   return invokeDbCommand('migrate_legacy_workspace', { input });
 }
 
+// Desktop Runtime Lifecycle & Safeguards (Stage 2.2.4, Step 1)
+export function markMigrationNotNeeded(
+  source?: string | null
+): Promise<MigrationStatusDto> {
+  return invokeDbCommand('mark_migration_not_needed', {
+    source: source ?? null,
+  });
+}
+
+export function recordMigrationError(
+  diagnostic: MigrationDiagnosticDto
+): Promise<MigrationDiagnosticDto> {
+  return invokeDbCommand('record_migration_error', { diagnostic });
+}
+
+export function replaceDesktopWorkspace(
+  input: ReplaceDesktopWorkspaceInput
+): Promise<WorkspaceLifecycleResultDto> {
+  return invokeDbCommand('replace_desktop_workspace', { input });
+}
+
+export function clearDesktopWorkspace(
+  source?: string | null
+): Promise<WorkspaceLifecycleResultDto> {
+  return invokeDbCommand('clear_desktop_workspace', {
+    source: source ?? null,
+  });
+}
+
 export const DesktopDatabaseService = {
   isSupported: isTauri,
   initializeDesktopDatabase,
@@ -1278,5 +1328,9 @@ export const DesktopDatabaseService = {
   getMigrationStatus,
   backupLegacyLocalstorage,
   migrateLegacyWorkspace,
+  markMigrationNotNeeded,
+  recordMigrationError,
+  replaceDesktopWorkspace,
+  clearDesktopWorkspace,
 };
 

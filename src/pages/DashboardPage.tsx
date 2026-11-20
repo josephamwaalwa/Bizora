@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { Button } from '../components/common/Button';
 import { Badge } from '../components/common/Badge';
@@ -19,6 +19,7 @@ export const DashboardPage: React.FC = () => {
     convertQuotationToInvoice,
   } = useApp();
 
+  const [convertingQuoteId, setConvertingQuoteId] = useState<string | null>(null);
   const currency = businessProfile.defaultCurrency;
   const symbol = businessProfile.currencySymbol;
 
@@ -240,10 +241,17 @@ export const DashboardPage: React.FC = () => {
                     <td className="text-right" onClick={(e) => e.stopPropagation()}>
                       {quo.status !== 'declined' && !quo.convertedInvoiceId && (
                         <button
-                          onClick={() => convertQuotationToInvoice(quo.id)}
-                          className="text-[14px] text-ink-secondary hover:text-ink"
+                          disabled={convertingQuoteId === quo.id}
+                          onClick={() => {
+                            if (convertingQuoteId) return;
+                            setConvertingQuoteId(quo.id);
+                            void convertQuotationToInvoice(quo.id).finally(() => {
+                              setConvertingQuoteId(null);
+                            });
+                          }}
+                          className="text-[14px] text-ink-secondary hover:text-ink disabled:opacity-50"
                         >
-                          Convert
+                          {convertingQuoteId === quo.id ? 'Converting...' : 'Convert'}
                         </button>
                       )}
                     </td>
