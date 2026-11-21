@@ -36,6 +36,7 @@ import {
 import { generateId, formatDocNumber } from '../utils/idGenerator';
 import { calculateDocumentFinancials } from '../utils/calculations';
 import {
+  executeDeletePaymentWorkflow,
   findLinkedInvoiceForQuotationRecord,
   resolveClientReferenceWithSnapshotFallback,
   validateConvertedQuotationEdit,
@@ -120,6 +121,7 @@ export interface AppContextType {
   duplicateInvoice: (id: string) => Promise<Invoice | undefined>;
   updateInvoiceStatus: (id: string, status: InvoiceStatus) => Promise<boolean>;
   recordPayment: (invoiceId: string, payment: NewPaymentInput) => Promise<Invoice | undefined>;
+  deletePayment: (paymentId: string) => Promise<boolean>;
 
   // Document Numbering Helpers
   getNextQuoteNumber: () => Promise<string>;
@@ -1467,6 +1469,41 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     [runMutation, reloadWorkspaceFromAdapter, addToast, previewDocument]
   );
 
+  const deletePayment = useCallback(
+    async (paymentId: string): Promise<boolean> => {
+      try {
+        return await runMutation(async (adapter) => {
+          return executeDeletePaymentWorkflow({
+            adapter,
+            paymentId,
+            knownInvoices: invoices,
+            didPersistLastWrite: didAdapterPersistLastWrite,
+            reloadWorkspace: reloadWorkspaceFromAdapter,
+            onInvoiceUpdated: (refreshedInvoice) => {
+              if (
+                previewDocument &&
+                previewDocument.type === 'invoice' &&
+                previewDocument.data.id === refreshedInvoice.id
+              ) {
+                setPreviewDocument({ type: 'invoice', data: refreshedInvoice });
+              }
+            },
+            onToast: addToast,
+          });
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to remove payment.';
+        addToast({
+          type: 'error',
+          title: 'Cannot Remove Payment',
+          message,
+        });
+        return false;
+      }
+    },
+    [invoices, runMutation, reloadWorkspaceFromAdapter, addToast, previewDocument]
+  );
+
   // Preview & Payment Modals
   const openDocumentPreview = useCallback((type: 'quote' | 'invoice', data: Quotation | Invoice) => {
     setPreviewDocument({ type, data });
@@ -1637,6 +1674,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         duplicateInvoice,
         updateInvoiceStatus,
         recordPayment,
+        deletePayment,
         getNextQuoteNumber,
         getNextInvoiceNumber,
         commitQuoteNumber,

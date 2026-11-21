@@ -3,10 +3,13 @@ import type {
   Invoice,
   InvoiceStatus,
   PaymentMethod,
+  PaymentRecord,
   Quotation,
   QuotationStatus,
 } from '../types';
+import type { PersistenceAdapter } from '../services/persistence/types';
 import { determineUpdatedInvoiceStatus, getLocalTodayDateString } from './calculations';
+import { formatCurrency } from './formatters';
 
 export interface PaymentModalFormState {
   amount: number;
@@ -303,3 +306,155 @@ export function resolveClientReferenceWithSnapshotFallback(
         : 'Cannot duplicate document because both the client record and client snapshot are missing.',
   };
 }
+
+export function sortPaymentsForDisplay(payments: readonly PaymentRecord[] = []): PaymentRecord[] {
+  return [...payments].sort((a, b) => {
+    const dateDiff = (b.paymentDate || '').localeCompare(a.paymentDate || '');
+    if (dateDiff !== 0) return dateDiff;
+    const recordedDiff = (b.recordedAt || '').localeCompare(a.recordedAt || '');
+    if (recordedDiff !== 0) return recordedDiff;
+    return (a.id || '').localeCompare(b.id || '');
+  });
+}
+
+export interface PaymentDeletionConfirmCopy {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  isDestructive: true;
+}
+
+export function buildPaymentDeletionConfirmCopy(
+  invoice: Pick<Invoice, 'invoiceNumber' | 'currency' | 'currencySymbol'>,
+  payment: Pick<PaymentRecord, 'amount'>
+): PaymentDeletionConfirmCopy {
+  const formattedAmount = formatCurrency(payment.amount, invoice.currency, invoice.currencySymbol);
+  return {
+    title: 'Remove Payment',
+    message: `Are you sure you want to remove the ${formattedAmount} payment from invoice ${invoice.invoiceNumber}? The invoice amount paid, outstanding balance, and status will be recalculated automatically.`,
+    confirmLabel: 'Remove Payment',
+    cancelLabel: 'Cancel',
+    isDestructive: true,
+  };
+}
+
+export function getOverpaymentAdjustmentWarning(
+  grandTotal: number,
+  amountPaid: number,
+  currency: string,
+  currencySymbol: string
+): string | null {
+  const safeTotal = Math.max(0, Number(grandTotal) || 0);
+  const safePaid = Math.max(0, Number(amountPaid) || 0);
+  if (safePaid <= safeTotal + 0.01) {
+    return null;
+  }
+
+  return `Recorded payments (${formatCurrency(safePaid, currency, currencySymbol)}) exceed the updated invoice total (${formatCurrency(safeTotal, currency, currencySymbol)}). Balance due will remain zero unless a payment is removed or the invoice total is increased.`;
+}
+
+export interface DeletePaymentWorkflowDeps {
+  adapter: PersistenceAdapter;
+  paymentId: string;
+  knownInvoices: readonly Invoice[];
+  didPersistLastWrite: (adapter: PersistenceAdapter) => boolean;
+  reloadWorkspace: (adapter: PersistenceAdapter) => Promise<void>;
+  onInvoiceUpdated?: (refreshedInvoice: Invoice) => void;
+  onToast: (toast: {
+    type: 'success' | 'error' | 'info' | 'warning';
+    title: string;
+    message?: string;
+  }) => void;
+  logWarn?: (message: string, err: unknown) => void;
+}
+
+export async function executeDeletePaymentWorkflow({
+  adapter,
+  paymentId,
+  knownInvoices,
+  didPersistLastWrite,
+  reloadWorkspace,
+  onInvoiceUpdated,
+  onToast,
+  logWarn = (msg, err) => console.warn(msg, err),
+}: DeletePaymentWorkflowDeps): Promise<boolean> {
+  const findTarget = (list: readonly Invoice[]) => {
+    for (const inv of list) {
+      const payment = (inv.payments ?? []).find((p) => p.id === paymentId);
+      if (payment) {
+        return { invoice: inv, payment };
+      }
+    }
+    return null;
+  };
+
+  let target = findTarget(knownInvoices);
+  if (!target) {
+    const freshInvoices = await adapter.getInvoices();
+    target = findTarget(freshInvoices);
+  }
+
+  if (!target) {
+    onToast({
+      type: 'error',
+      title: 'Cannot Remove Payment',
+      message: 'The selected payment record could not be found.',
+    });
+    return false;
+  }
+
+  const { invoice: parentInvoice, payment: targetPayment } = target;
+  await adapter.deletePayment(paymentId);
+  const persisted = didPersistLastWrite(adapter);
+
+  const refreshedInvoice = await adapter.getInvoiceById(parentInvoice.id);
+  const removedAmountText = formatCurrency(
+    targetPayment.amount,
+    parentInvoice.currency,
+    parentInvoice.currencySymbol
+  );
+
+  try {
+    const nextBalanceText = refreshedInvoice
+      ? formatCurrency(
+          refreshedInvoice.outstandingBalance,
+          refreshedInvoice.currency,
+          refreshedInvoice.currencySymbol
+        )
+      : '';
+    await adapter.addActivity({
+      type: 'invoice_status',
+      title: `Payment Removed from ${parentInvoice.invoiceNumber}`,
+      description: refreshedInvoice
+        ? `Removed ${removedAmountText} payment. Updated balance: ${nextBalanceText} (status: ${refreshedInvoice.status}).`
+        : `Removed ${removedAmountText} payment from ${parentInvoice.invoiceNumber}.`,
+      referenceId: parentInvoice.id,
+    });
+  } catch (activityErr) {
+    logWarn('Failed to log payment removal activity:', activityErr);
+  }
+
+  await reloadWorkspace(adapter);
+
+  if (refreshedInvoice && onInvoiceUpdated) {
+    onInvoiceUpdated(refreshedInvoice);
+  }
+
+  if (persisted) {
+    onToast({
+      type: 'success',
+      title: 'Payment Removed',
+      message: `Removed ${removedAmountText} from ${parentInvoice.invoiceNumber}. Balance and status have been recalculated.`,
+    });
+  } else {
+    onToast({
+      type: 'warning',
+      title: 'Updated Active Session',
+      message: `Payment removed from ${parentInvoice.invoiceNumber} in memory, but browser storage could not persist the change across reloads.`,
+    });
+  }
+
+  return true;
+}
+

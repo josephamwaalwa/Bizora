@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { PrintableDocument } from './PrintableDocument';
+import { InvoicePaymentsPanel } from './InvoicePaymentsPanel';
 import { Button } from '../common/Button';
 import { generateDocumentPdfBytes } from '../../services/pdfGenerator';
 import { buildDocumentPdfFilename, exportPdfFile } from '../../services/fileOperations';
@@ -11,6 +12,7 @@ import {
   Copy,
   ArrowRight,
   CreditCard,
+  History,
   X,
   FileCheck,
 } from 'lucide-react';
@@ -35,6 +37,7 @@ export const DocumentPreviewModal: React.FC = () => {
 
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [isMutating, setIsMutating] = useState(false);
+  const [showPaymentsPanel, setShowPaymentsPanel] = useState(true);
 
   if (!previewDocument) return null;
 
@@ -258,6 +261,19 @@ export const DocumentPreviewModal: React.FC = () => {
             </Button>
           )}
 
+          {/* Invoice: Toggle Payment History Panel (available for unpaid, partial, and paid) */}
+          {isInvoice && invoice && (
+            <Button
+              variant="secondary"
+              size="sm"
+              aria-expanded={showPaymentsPanel}
+              leftIcon={<History className="w-3.5 h-3.5 text-teal-600" />}
+              onClick={() => setShowPaymentsPanel((prev) => !prev)}
+            >
+              Payments ({invoice.payments?.length ?? 0})
+            </Button>
+          )}
+
           <Button
             variant="secondary"
             size="sm"
@@ -309,7 +325,16 @@ export const DocumentPreviewModal: React.FC = () => {
       </div>
 
       {/* Desk Preview Container */}
-      <div className="document-preview-sheet py-8 sm:py-12 px-3 sm:px-6 flex justify-center bg-slate-200/60 dark:bg-[#0B1220] print:bg-white print:p-0">
+      <div className="document-preview-sheet py-8 sm:py-12 px-3 sm:px-6 flex flex-col items-center gap-6 bg-slate-200/60 dark:bg-[#0B1220] print:bg-white print:p-0">
+        {isInvoice && invoice && showPaymentsPanel && (
+          <div className="w-[210mm] max-w-full no-print">
+            <InvoicePaymentsPanel
+              invoice={invoice}
+              showRecordButton={invoice.status !== 'paid'}
+            />
+          </div>
+        )}
+
         <PrintableDocument
           document={liveDocument}
           type={type}

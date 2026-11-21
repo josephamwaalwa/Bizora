@@ -13,9 +13,11 @@ import {
 } from '../utils/calculations';
 import {
   getInvoiceStatusOptionsForUi,
+  getOverpaymentAdjustmentWarning,
   hasRecordedInvoicePayment,
   validateManualInvoiceStatusChange,
 } from '../utils/documentWorkflow';
+import { InvoicePaymentsPanel } from '../components/documents/InvoicePaymentsPanel';
 import { formatCurrency } from '../utils/formatters';
 import { generateId } from '../utils/idGenerator';
 import {
@@ -104,6 +106,15 @@ export const InvoiceFormPage: React.FC = () => {
   const [status, setStatus] = useState<InvoiceStatus>(() => {
     return existingInvoice?.status || 'sent';
   });
+  const lastPersistedStatusRef = useRef<InvoiceStatus | undefined>(existingInvoice?.status);
+
+  useEffect(() => {
+    const nextPersistedStatus = existingInvoice?.status;
+    if (nextPersistedStatus && nextPersistedStatus !== lastPersistedStatusRef.current) {
+      setStatus(nextPersistedStatus);
+    }
+    lastPersistedStatusRef.current = nextPersistedStatus;
+  }, [existingInvoice?.status]);
 
   const [currency, setCurrency] = useState(existingInvoice?.currency || businessProfile.defaultCurrency || 'NAD');
   const [currencySymbol, setCurrencySymbol] = useState(existingInvoice?.currencySymbol || businessProfile.currencySymbol || 'N$');
@@ -164,6 +175,9 @@ export const InvoiceFormPage: React.FC = () => {
   const currentPayments = existingInvoice?.payments || [];
   const { amountPaid, outstandingBalance } = calculateInvoiceBalances(financials.grandTotal, currentPayments);
   const hasPayments = hasRecordedInvoicePayment({ amountPaid, payments: currentPayments });
+  const overpaymentWarning = isEditing
+    ? getOverpaymentAdjustmentWarning(financials.grandTotal, amountPaid, currency, currencySymbol)
+    : null;
   const paymentDerivedStatus = hasPayments
     ? determineUpdatedInvoiceStatus(status, financials.grandTotal, amountPaid, dueDate)
     : status;
@@ -725,6 +739,22 @@ export const InvoiceFormPage: React.FC = () => {
               rows={3}
             />
           </div>
+
+          {isEditing && existingInvoice && currentPayments.length > 0 && (
+            <InvoicePaymentsPanel
+              invoice={{
+                ...existingInvoice,
+                currency,
+                currencySymbol,
+                grandTotal: financials.grandTotal,
+                amountPaid,
+                outstandingBalance,
+                status: effectiveStatus,
+                payments: currentPayments,
+              }}
+              showRecordButton={effectiveStatus !== 'paid'}
+            />
+          )}
         </div>
 
         {/* Right Sidebar: Meta & Financials (4 cols) */}
@@ -803,7 +833,11 @@ export const InvoiceFormPage: React.FC = () => {
                 }
               />
 
-              {isEditing && existingInvoice && existingInvoice.status !== 'paid' && (
+              {isEditing &&
+                existingInvoice &&
+                existingInvoice.status !== 'paid' &&
+                effectiveStatus !== 'paid' &&
+                outstandingBalance > 0 && (
                 <Button
                   type="button"
                   variant="secondary"
@@ -812,7 +846,9 @@ export const InvoiceFormPage: React.FC = () => {
                   leftIcon={<CreditCard className="w-3.5 h-3.5 text-emerald-600" />}
                   onClick={() => openPaymentModal(existingInvoice)}
                 >
-                  Record Payment ({formatCurrency(existingInvoice.outstandingBalance, existingInvoice.currency, existingInvoice.currencySymbol)} due)
+                  {Math.abs(financials.grandTotal - existingInvoice.grandTotal) < 0.01
+                    ? `Record Payment (${formatCurrency(existingInvoice.outstandingBalance, existingInvoice.currency, existingInvoice.currencySymbol)} due)`
+                    : 'Record Payment'}
                 </Button>
               )}
             </div>
@@ -969,6 +1005,16 @@ export const InvoiceFormPage: React.FC = () => {
                   {formatCurrency(outstandingBalance, currency, currencySymbol)}
                 </span>
               </div>
+
+              {overpaymentWarning && (
+                <div
+                  role="alert"
+                  className="mt-2 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200 flex items-start gap-2"
+                >
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-700 dark:text-amber-400" />
+                  <span>{overpaymentWarning}</span>
+                </div>
+              )}
             </div>
 
             <div className="pt-2">

@@ -12,15 +12,20 @@ import { initialBusinessProfile, initialClients } from '../services/seedData';
 import type { BusinessProfile, Client, Invoice, Quotation } from '../types';
 import { determineUpdatedInvoiceStatus, isDateBeforeLocalToday } from './calculations';
 import {
+  buildPaymentDeletionConfirmCopy,
   createInitialPaymentFormState,
+  executeDeletePaymentWorkflow,
   getInvoiceStatusOptionsForUi,
+  getOverpaymentAdjustmentWarning,
   getPaymentModalResetKey,
   resolveClientReferenceWithSnapshotFallback,
+  sortPaymentsForDisplay,
   validateConvertedQuotationEdit,
   validateManualInvoiceStatusChange,
   validateQuotationStatusChange,
 } from './documentWorkflow';
 import { DocumentSheet } from '../components/documents/DocumentSheet';
+import { InvoicePaymentsPanelContent } from '../components/documents/InvoicePaymentsPanel';
 
 // Lightweight localStorage + bridge harness for adapter-level Stage 3.1 workflow regression tests
 class MemoryLocalStorage implements Storage {
@@ -368,7 +373,36 @@ class WorkflowSqliteBridgeSpy implements SqlitePersistenceBridge {
   async getPaymentsByBusiness(businessId: string) {
     return Array.from(this.payments.values()).filter((p) => p.businessId === businessId);
   }
-  async deletePayment(id: string) { this.payments.delete(id); }
+  async deletePayment(id: string) {
+    this.calls.push('deletePayment');
+    const existing = this.payments.get(id);
+    if (!existing) throw new Error('Payment not found');
+    this.payments.delete(id);
+    const inv = this.invoices.get(existing.invoiceId);
+    if (inv) {
+      const remaining = Array.from(this.payments.values()).filter((p) => p.invoiceId === inv.id);
+      const totalPaid = remaining.reduce((sum, p) => sum + BigInt(p.amountMinor), 0n);
+      const grandTotal = BigInt(inv.grandTotalMinor);
+      const balance = grandTotal > totalPaid ? grandTotal - totalPaid : 0n;
+      const isPastDue = Boolean(inv.dueDate && isDateBeforeLocalToday(inv.dueDate));
+      const nextStatus =
+        totalPaid >= grandTotal && grandTotal > 0n
+          ? 'paid'
+          : totalPaid > 0n
+            ? 'partially_paid'
+            : isPastDue
+              ? 'overdue'
+              : 'sent';
+      this.invoices.set(inv.id, {
+        ...inv,
+        payments: remaining,
+        amountPaidMinor: totalPaid.toString(),
+        outstandingBalanceMinor: balance.toString(),
+        status: nextStatus,
+        updatedAt: this.tick(),
+      });
+    }
+  }
 
   async createActivityLog(input: any) {
     this.calls.push(`createActivity:${input.activityType}`);
@@ -759,3 +793,284 @@ test('Task 7: DocumentSheet and BizoraPdfDocument use "Quoted Total" for quotati
   assert.equal(pdfSource.includes("isInvoice ? 'Total' : 'Quoted Total'"), true);
   assert.equal(pdfSource.includes('Total Amount Due'), false);
 });
+
+// ============================================================
+// Stage 3.2.1: Payment History, Safe Deletion & Integrations
+// ============================================================
+
+test('Stage 3.2.1: InvoicePaymentsPanelContent renders payment fields, empty state, paid-invoice controls, and confirmation copy', () => {
+  const profile = makeProfile();
+  const client = makeClient();
+
+  const paidInvoice = makeInvoice(profile, client, {
+    id: 'inv_paid_panel',
+    invoiceNumber: 'INV-0099',
+    grandTotal: 2300,
+    amountPaid: 2300,
+    outstandingBalance: 0,
+    status: 'paid',
+    payments: [
+      {
+        id: 'pay_old',
+        invoiceId: 'inv_paid_panel',
+        amount: 800,
+        paymentDate: '2026-11-10',
+        paymentMethod: 'cash',
+        recordedAt: '2026-11-10T08:00:00.000Z',
+      },
+      {
+        id: 'pay_new',
+        invoiceId: 'inv_paid_panel',
+        amount: 1500,
+        paymentDate: '2026-11-18',
+        paymentMethod: 'bank_transfer',
+        reference: 'FNB-8821',
+        notes: 'Final settlement tranche',
+        recordedAt: '2026-11-18T11:30:00.000Z',
+      },
+    ],
+  });
+
+  const sorted = sortPaymentsForDisplay(paidInvoice.payments);
+  assert.equal(sorted[0].id, 'pay_new');
+  assert.equal(sorted[1].id, 'pay_old');
+
+  const paidMarkup = renderToStaticMarkup(
+    React.createElement(InvoicePaymentsPanelContent, {
+      invoice: paidInvoice,
+      onDeletePayment: async () => true,
+      showConfirmDialog: () => {},
+      onRecordPayment: () => {},
+    })
+  );
+
+  // Payment details & formatters
+  assert.equal(paidMarkup.includes('Payment History'), true);
+  assert.equal(paidMarkup.includes('2 payments'), true);
+  assert.equal(paidMarkup.includes('Bank Transfer / EFT'), true);
+  assert.equal(paidMarkup.includes('Cash'), true);
+  assert.equal(paidMarkup.includes('Ref: FNB-8821'), true);
+  assert.equal(paidMarkup.includes('Final settlement tranche'), true);
+  assert.equal(paidMarkup.includes('1,500.00'), true);
+  assert.equal(paidMarkup.includes('800.00'), true);
+  // Accessible even on paid invoice while Record Payment action stays hidden
+  assert.equal(paidMarkup.includes('Remove payment of'), true);
+  assert.equal(paidMarkup.includes('Record Payment'), false);
+
+  // Empty unpaid invoice state
+  const unpaidInvoice = makeInvoice(profile, client, {
+    id: 'inv_empty_panel',
+    invoiceNumber: 'INV-0100',
+    amountPaid: 0,
+    outstandingBalance: 2300,
+    status: 'sent',
+    payments: [],
+  });
+  const emptyMarkup = renderToStaticMarkup(
+    React.createElement(InvoicePaymentsPanelContent, {
+      invoice: unpaidInvoice,
+      onDeletePayment: async () => true,
+      showConfirmDialog: () => {},
+      onRecordPayment: () => {},
+    })
+  );
+  assert.equal(
+    emptyMarkup.includes('No payments have been recorded for invoice INV-0100 yet.'),
+    true
+  );
+  assert.equal(emptyMarkup.includes('Record Payment'), true);
+
+  // Destructive confirmation copy
+  const confirmCopy = buildPaymentDeletionConfirmCopy(paidInvoice, paidInvoice.payments[1]);
+  assert.equal(confirmCopy.isDestructive, true);
+  assert.equal(confirmCopy.message.includes('1,500.00'), true);
+  assert.equal(confirmCopy.message.includes('INV-0099'), true);
+  assert.equal(confirmCopy.message.includes('recalculated'), true);
+});
+
+test('Stage 3.2.1: executeDeletePaymentWorkflow deletes from paid invoices, recalculates balance/status, logs safe invoice_status activity, refreshes preview, and preserves persistence warnings', async () => {
+  // 1. Browser adapter flow: paid invoice -> delete 1 of 2 payments -> partially_paid -> delete last -> sent
+  mockStorage.clear();
+  const browser = new BrowserPersistenceAdapter();
+  await browser.clearAllData();
+  const bProfile = await browser.saveBusinessProfile(makeProfile());
+  const bClient = await browser.saveClient(makeClient());
+  const bInv = await browser.saveInvoice(
+    makeInvoice(bProfile, bClient, {
+      id: 'inv_del_flow_b',
+      invoiceNumber: 'INV-3201',
+      dueDate: '2099-12-31',
+      grandTotal: 1000,
+      subtotal: 1000,
+      taxRate: 0,
+      taxAmount: 0,
+      outstandingBalance: 1000,
+      status: 'sent',
+    })
+  );
+
+  await browser.recordPayment(bInv.id, {
+    amount: 400,
+    paymentDate: '2026-11-15',
+    paymentMethod: 'eft',
+    reference: 'EFT-1',
+  });
+  const fullyPaidBrowser = await browser.recordPayment(bInv.id, {
+    amount: 600,
+    paymentDate: '2026-11-18',
+    paymentMethod: 'cash',
+    reference: 'CASH-2',
+  });
+  assert.equal(fullyPaidBrowser?.status, 'paid');
+  assert.equal(fullyPaidBrowser?.outstandingBalance, 0);
+
+  const previewRefreshes: Invoice[] = [];
+  const toasts: Array<{ type: string; title: string; message?: string }> = [];
+  let workspaceInvoices = await browser.getInvoices();
+
+  const firstDeleteOk = await executeDeletePaymentWorkflow({
+    adapter: browser,
+    paymentId: fullyPaidBrowser!.payments[1].id,
+    knownInvoices: workspaceInvoices,
+    didPersistLastWrite: (a) => (a instanceof BrowserPersistenceAdapter ? a.lastWritePersisted : true),
+    reloadWorkspace: async (a) => {
+      workspaceInvoices = await a.getInvoices();
+    },
+    onInvoiceUpdated: (refreshed) => previewRefreshes.push(refreshed),
+    onToast: (t) => toasts.push(t),
+  });
+
+  assert.equal(firstDeleteOk, true);
+  assert.equal(previewRefreshes.length, 1);
+  assert.equal(previewRefreshes[0].status, 'partially_paid');
+  assert.equal(previewRefreshes[0].amountPaid, 400);
+  assert.equal(previewRefreshes[0].outstandingBalance, 600);
+  assert.equal(workspaceInvoices[0].status, 'partially_paid');
+  assert.equal(toasts[0].type, 'success');
+
+  const activitiesAfterFirst = await browser.getActivities();
+  const removalActivity = activitiesAfterFirst.find((a) =>
+    a.title.includes('Payment Removed from INV-3201')
+  );
+  assert.equal(removalActivity?.type, 'invoice_status');
+
+  // Delete remaining payment -> reverts to sent (and preserves browser non-persisted warning if storage write fails)
+  const secondDeleteOk = await executeDeletePaymentWorkflow({
+    adapter: browser,
+    paymentId: previewRefreshes[0].payments[0].id,
+    knownInvoices: workspaceInvoices,
+    didPersistLastWrite: () => false,
+    reloadWorkspace: async (a) => {
+      workspaceInvoices = await a.getInvoices();
+    },
+    onInvoiceUpdated: (refreshed) => previewRefreshes.push(refreshed),
+    onToast: (t) => toasts.push(t),
+  });
+
+  assert.equal(secondDeleteOk, true);
+  assert.equal(previewRefreshes[1].status, 'sent');
+  assert.equal(previewRefreshes[1].amountPaid, 0);
+  assert.equal(previewRefreshes[1].outstandingBalance, 1000);
+  assert.equal(toasts[1].type, 'warning');
+  assert.match(toasts[1].message || '', /browser storage could not persist/i);
+
+  // 2. SQLite adapter flow + missing ID error handling + non-fatal activity failure
+  const spy = new WorkflowSqliteBridgeSpy();
+  const sqlite = new SqlitePersistenceAdapter({
+    bridge: spy as any,
+    now: () => '2026-11-21T10:00:00.000Z',
+  });
+  const sProfile = await sqlite.saveBusinessProfile(makeProfile());
+  const sClient = await sqlite.saveClient(makeClient());
+  const sInv = await sqlite.saveInvoice(
+    makeInvoice(sProfile, sClient, {
+      id: 'inv_del_flow_s',
+      invoiceNumber: 'INV-3202',
+      dueDate: '2026-11-01',
+      grandTotal: 500,
+      subtotal: 500,
+      taxRate: 0,
+      taxAmount: 0,
+      outstandingBalance: 500,
+      status: 'overdue',
+    })
+  );
+  const sPaid = await sqlite.recordPayment(sInv.id, {
+    amount: 500,
+    paymentDate: '2026-11-19',
+    paymentMethod: 'bank_transfer',
+  });
+  assert.equal(sPaid?.status, 'paid');
+
+  // Unknown payment id exits cleanly without mutating
+  const missingResult = await executeDeletePaymentWorkflow({
+    adapter: sqlite,
+    paymentId: 'pay_does_not_exist',
+    knownInvoices: [sPaid!],
+    didPersistLastWrite: () => true,
+    reloadWorkspace: async () => {},
+    onToast: (t) => toasts.push(t),
+  });
+  assert.equal(missingResult, false);
+  assert.equal(toasts[toasts.length - 1].type, 'error');
+
+  // Force addActivity to throw while deleting on SQLite -> deletion and refresh still succeed
+  const originalAddActivity = sqlite.addActivity.bind(sqlite);
+  sqlite.addActivity = async () => {
+    throw new Error('simulated activity log failure');
+  };
+  let sqliteInvoices = await sqlite.getInvoices();
+  const sqliteUpdates: Invoice[] = [];
+  const warnings: string[] = [];
+
+  const sqliteOk = await executeDeletePaymentWorkflow({
+    adapter: sqlite,
+    paymentId: sPaid!.payments[0].id,
+    knownInvoices: sqliteInvoices,
+    didPersistLastWrite: () => true,
+    reloadWorkspace: async (a) => {
+      sqliteInvoices = await a.getInvoices();
+    },
+    onInvoiceUpdated: (refreshed) => sqliteUpdates.push(refreshed),
+    onToast: (t) => toasts.push(t),
+    logWarn: (msg) => warnings.push(msg),
+  });
+  sqlite.addActivity = originalAddActivity;
+
+  assert.equal(sqliteOk, true);
+  assert.equal(warnings.length, 1);
+  assert.equal(sqliteUpdates[0].amountPaid, 0);
+  assert.equal(sqliteUpdates[0].outstandingBalance, 500);
+  assert.equal(sqliteUpdates[0].status, 'overdue');
+});
+
+test('Stage 3.2.1: Overpayment warning and Preview/Editor/AppContext integration contracts', () => {
+  assert.equal(getOverpaymentAdjustmentWarning(1000, 1000, 'NAD', 'N$'), null);
+  assert.equal(getOverpaymentAdjustmentWarning(1000, 1000.01, 'NAD', 'N$'), null);
+  const warning = getOverpaymentAdjustmentWarning(800, 1200, 'NAD', 'N$');
+  assert.ok(warning);
+  assert.equal(warning.includes('1,200.00'), true);
+  assert.equal(warning.includes('800.00'), true);
+
+  const appContextSrc = readFileSync(resolve('src/context/AppContext.tsx'), 'utf8');
+  assert.equal(appContextSrc.includes('deletePayment: (paymentId: string) => Promise<boolean>;'), true);
+  assert.equal(appContextSrc.includes('executeDeletePaymentWorkflow'), true);
+  assert.equal(appContextSrc.includes('setPreviewDocument({ type: \'invoice\', data: refreshedInvoice })'), true);
+
+  const previewSrc = readFileSync(resolve('src/components/documents/DocumentPreviewModal.tsx'), 'utf8');
+  assert.equal(previewSrc.includes('<InvoicePaymentsPanel'), true);
+  assert.equal(previewSrc.includes('isInvoice && invoice && showPaymentsPanel'), true);
+  assert.equal(previewSrc.includes('no-print'), true);
+
+  // Printable/PDF document templates remain free of payment management actions
+  const sheetSrc = readFileSync(resolve('src/components/documents/DocumentSheet.tsx'), 'utf8');
+  const pdfSrc = readFileSync(resolve('src/components/documents/BizoraPdfDocument.tsx'), 'utf8');
+  assert.equal(sheetSrc.includes('InvoicePaymentsPanel'), false);
+  assert.equal(pdfSrc.includes('InvoicePaymentsPanel'), false);
+
+  const formSrc = readFileSync(resolve('src/pages/InvoiceFormPage.tsx'), 'utf8');
+  assert.equal(formSrc.includes('<InvoicePaymentsPanel'), true);
+  assert.equal(formSrc.includes('getOverpaymentAdjustmentWarning'), true);
+  assert.equal(formSrc.includes('role="alert"'), true);
+});
+
