@@ -314,6 +314,11 @@ pub fn recompute_invoice_payment_state(
         "paid"
     } else if amount_paid_minor > 0 && amount_paid_minor < grand_total_minor {
         "partially_paid"
+    } else if grand_total_minor == 0 {
+        match current_status {
+            "draft" => "draft",
+            _ => "sent",
+        }
     } else if is_past_due && amount_paid_minor < grand_total_minor {
         "overdue"
     } else if current_status == "overdue" && !is_past_due {

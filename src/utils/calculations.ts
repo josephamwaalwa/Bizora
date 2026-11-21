@@ -121,8 +121,20 @@ export function determineUpdatedInvoiceStatus(
   const normalizedDue = normalizeDateOnly(dueDateString);
   const today = todayString || getLocalTodayDateString();
 
+  // Zero-total invoices with no recorded payments owe nothing and must never be marked overdue.
+  if (safeTotal === 0) {
+    if (
+      currentStatus === 'overdue' ||
+      currentStatus === 'paid' ||
+      currentStatus === 'partially_paid'
+    ) {
+      return 'sent';
+    }
+    return currentStatus || 'sent';
+  }
+
   // No recorded payments (safePaid <= 0): never allow 'paid' or 'partially_paid'
-  if (normalizedDue && normalizedDue < today && (safePaid < safeTotal || safeTotal === 0)) {
+  if (normalizedDue && normalizedDue < today && safePaid < safeTotal) {
     return 'overdue';
   }
 

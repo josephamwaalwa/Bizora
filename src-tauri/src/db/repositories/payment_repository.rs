@@ -29,18 +29,47 @@ pub fn create_payment(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|err| DbError::TransactionFailed(format!("Failed to begin transaction: {err}")))?;
 
-    let invoice_exists: i64 = tx
+    let invoice_state: Option<(i64, i64, String)> = tx
         .query_row(
-            "SELECT COUNT(*) FROM invoices WHERE business_id = ?1 AND id = ?2;",
+            "SELECT grand_total_minor, outstanding_balance_minor, status
+             FROM invoices
+             WHERE business_id = ?1 AND id = ?2;",
             params![business_id, invoice_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
+        .optional()
         .map_err(|err| map_rusqlite_error(err, "verifying payment parent invoice"))?;
 
-    if invoice_exists == 0 {
-        return Err(DbError::ForeignKeyViolation(
-            "Referenced invoice does not exist for this business".to_string(),
-        ));
+    let (grand_total_minor, outstanding_balance_minor, invoice_status) = match invoice_state {
+        Some(state) => state,
+        None => {
+            return Err(DbError::ForeignKeyViolation(
+                "Referenced invoice does not exist for this business".to_string(),
+            ));
+        }
+    };
+
+    if invoice_status == "paid" {
+        return Err(DbError::InvalidInput {
+            field: Some("invoiceId".to_string()),
+            message: "Cannot record payment because this invoice is already paid".to_string(),
+        });
+    }
+
+    if grand_total_minor <= 0 || outstanding_balance_minor <= 0 {
+        return Err(DbError::InvalidInput {
+            field: Some("amountMinor".to_string()),
+            message: "Cannot record payment because this invoice has no outstanding balance"
+                .to_string(),
+        });
+    }
+
+    let max_allowed_minor = outstanding_balance_minor.saturating_add(1);
+    if amount_minor > max_allowed_minor {
+        return Err(DbError::InvalidInput {
+            field: Some("amountMinor".to_string()),
+            message: "Payment amount exceeds the remaining invoice balance".to_string(),
+        });
     }
 
     tx.execute(

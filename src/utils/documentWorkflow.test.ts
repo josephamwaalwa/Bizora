@@ -6,22 +6,34 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   BrowserPersistenceAdapter,
+  PersistenceError,
   SqlitePersistenceAdapter,
 } from '../services/persistence';
+import { StorageService } from '../services/storage';
 import { initialBusinessProfile, initialClients } from '../services/seedData';
 import type { BusinessProfile, Client, Invoice, Quotation } from '../types';
-import { determineUpdatedInvoiceStatus, isDateBeforeLocalToday } from './calculations';
+import {
+  determineUpdatedInvoiceStatus,
+  getLocalTodayDateString,
+  isDateBeforeLocalToday,
+} from './calculations';
 import {
   buildPaymentDeletionConfirmCopy,
+  CANONICAL_PAYMENT_METHODS,
   createInitialPaymentFormState,
   executeDeletePaymentWorkflow,
   getInvoiceStatusOptionsForUi,
   getOverpaymentAdjustmentWarning,
   getPaymentModalResetKey,
+  PAYMENT_METHOD_SELECT_OPTIONS,
+  parseStrictPaymentAmount,
   resolveClientReferenceWithSnapshotFallback,
   sortPaymentsForDisplay,
   validateConvertedQuotationEdit,
   validateManualInvoiceStatusChange,
+  validatePaymentDate,
+  validatePaymentInput,
+  validatePaymentMethodValue,
   validateQuotationStatusChange,
 } from './documentWorkflow';
 import { DocumentSheet } from '../components/documents/DocumentSheet';
@@ -348,6 +360,7 @@ class WorkflowSqliteBridgeSpy implements SqlitePersistenceBridge {
   async deleteInvoice(id: string) { this.invoices.delete(id); }
 
   async createPayment(input: any) {
+    this.calls.push('createPayment');
     const dto = { ...input, recordedAt: input.recordedAt ?? this.tick() };
     this.payments.set(dto.id, dto);
     const inv = this.invoices.get(dto.invoiceId);
@@ -1072,5 +1085,381 @@ test('Stage 3.2.1: Overpayment warning and Preview/Editor/AppContext integration
   assert.equal(formSrc.includes('<InvoicePaymentsPanel'), true);
   assert.equal(formSrc.includes('getOverpaymentAdjustmentWarning'), true);
   assert.equal(formSrc.includes('role="alert"'), true);
+});
+
+// ============================================================
+// Stage 3.2.2: Payment Validation & Data Integrity Hardening
+// ============================================================
+
+test('Stage 3.2.2: parseStrictPaymentAmount rejects malformed/non-positive/over-precision values and accepts exact cents', () => {
+  const invalidCases: Array<unknown> = [
+    0,
+    '0',
+    '0.00',
+    -1,
+    -50.25,
+    '-10',
+    '-0.01',
+    NaN,
+    'NaN',
+    Infinity,
+    -Infinity,
+    'Infinity',
+    '100abc',
+    'abc',
+    '',
+    '   ',
+    '100.',
+    '.',
+    '1e-5',
+    1e-5,
+    1e-7,
+    '1e+2',
+    10.129,
+    '10.129',
+    '10.500',
+    0.001,
+    null,
+    undefined,
+  ];
+
+  for (const bad of invalidCases) {
+    const res = parseStrictPaymentAmount(bad);
+    assert.equal(res.ok, false, `Expected invalid amount rejection for ${String(bad)}`);
+    assert.ok(res.error);
+  }
+
+  assert.deepEqual(parseStrictPaymentAmount(250), {
+    ok: true,
+    amount: 250,
+    amountMinor: 25000,
+  });
+  assert.deepEqual(parseStrictPaymentAmount('250'), {
+    ok: true,
+    amount: 250,
+    amountMinor: 25000,
+  });
+  assert.deepEqual(parseStrictPaymentAmount(120.5), {
+    ok: true,
+    amount: 120.5,
+    amountMinor: 12050,
+  });
+  assert.deepEqual(parseStrictPaymentAmount('120.5'), {
+    ok: true,
+    amount: 120.5,
+    amountMinor: 12050,
+  });
+  // Verify exact integer cents without IEEE-754 float drift (19.99 * 100 === 1998.9999999999998)
+  assert.deepEqual(parseStrictPaymentAmount(19.99), {
+    ok: true,
+    amount: 19.99,
+    amountMinor: 1999,
+  });
+  assert.deepEqual(parseStrictPaymentAmount('19.99'), {
+    ok: true,
+    amount: 19.99,
+    amountMinor: 1999,
+  });
+  assert.deepEqual(parseStrictPaymentAmount('.50'), {
+    ok: true,
+    amount: 0.5,
+    amountMinor: 50,
+  });
+});
+
+test('Stage 3.2.2: validatePaymentDate enforces strict YYYY-MM-DD calendar/leap-year rules and local-date fallback', () => {
+  const invalidDates: Array<unknown> = [
+    '',
+    '   ',
+    ' 2026-11-21 ',
+    '2026/11/21',
+    '21-11-2026',
+    'not-a-date',
+    '2026-11-21T10:00:00.000Z',
+    '2026-13-01',
+    '2026-00-10',
+    '2026-04-31',
+    '2026-02-30',
+    '2025-02-29', // non-leap year
+    '1900-02-29', // century non-leap year
+    '0000-01-01',
+  ];
+
+  for (const bad of invalidDates) {
+    const res = validatePaymentDate(bad);
+    assert.equal(res.ok, false, `Expected invalid date rejection for ${String(bad)}`);
+    assert.ok(res.error);
+  }
+
+  // Valid calendar and leap-year dates
+  assert.deepEqual(validatePaymentDate('2024-02-29'), { ok: true, paymentDate: '2024-02-29' });
+  assert.deepEqual(validatePaymentDate('2000-02-29'), { ok: true, paymentDate: '2000-02-29' });
+  assert.deepEqual(validatePaymentDate('2026-11-21'), { ok: true, paymentDate: '2026-11-21' });
+
+  // Omitted date falls back to local today (or provided today override), whereas explicit mode rejects omitted
+  assert.deepEqual(validatePaymentDate(undefined, { today: '2026-11-21' }), {
+    ok: true,
+    paymentDate: '2026-11-21',
+  });
+  assert.deepEqual(validatePaymentDate(undefined), {
+    ok: true,
+    paymentDate: getLocalTodayDateString(),
+  });
+  assert.equal(validatePaymentDate(undefined, { allowOmittedFallback: false }).ok, false);
+});
+
+test('Stage 3.2.2: canonical 7 payment methods are enforced across validator and RecordPaymentModal UI options', () => {
+  assert.equal(CANONICAL_PAYMENT_METHODS.length, 7);
+  for (const method of CANONICAL_PAYMENT_METHODS) {
+    const res = validatePaymentMethodValue(method);
+    assert.equal(res.ok, true, `Expected payment method '${method}' to be valid`);
+    assert.equal(res.paymentMethod, method);
+  }
+
+  for (const bad of ['wire', 'bitcoin', '', '   ', undefined, null]) {
+    const res = validatePaymentMethodValue(bad);
+    assert.equal(res.ok, false, `Expected invalid payment method rejection for ${String(bad)}`);
+  }
+
+  const uiValues = PAYMENT_METHOD_SELECT_OPTIONS.map((o) => o.value);
+  assert.equal(uiValues.length, 7);
+  assert.equal(uiValues.includes('bank_transfer'), true);
+  assert.equal(uiValues.includes('eft'), true);
+  const eftOpt = PAYMENT_METHOD_SELECT_OPTIONS.find((o) => o.value === 'eft');
+  const bankOpt = PAYMENT_METHOD_SELECT_OPTIONS.find((o) => o.value === 'bank_transfer');
+  assert.notEqual(eftOpt?.label, bankOpt?.label);
+
+  const modalSrc = readFileSync(resolve('src/components/documents/RecordPaymentModal.tsx'), 'utf8');
+  assert.equal(modalSrc.includes('validatePaymentInput'), true);
+  assert.equal(modalSrc.includes('PAYMENT_METHOD_SELECT_OPTIONS'), true);
+  assert.equal(modalSrc.includes('noValidate'), true);
+  assert.equal(modalSrc.includes('parseFloat'), false);
+});
+
+test('Stage 3.2.2: balance & overpayment protection enforces +0.01 tolerance on positive balance and blocks zero-balance/paid invoices', () => {
+  const profile = makeProfile();
+  const client = makeClient();
+
+  const openInvoice = makeInvoice(profile, client, {
+    grandTotal: 100,
+    amountPaid: 40,
+    outstandingBalance: 60,
+    status: 'partially_paid',
+  });
+
+  // Exact remaining balance -> ok
+  assert.equal(
+    validatePaymentInput(openInvoice, {
+      amount: 60,
+      paymentDate: '2026-11-21',
+      paymentMethod: 'eft',
+    }).ok,
+    true
+  );
+
+  // Within +N$0.01 tolerance -> ok
+  assert.equal(
+    validatePaymentInput(openInvoice, {
+      amount: 60.01,
+      paymentDate: '2026-11-21',
+      paymentMethod: 'bank_transfer',
+    }).ok,
+    true
+  );
+
+  // Exceeds +N$0.01 tolerance -> rejected
+  const over = validatePaymentInput(openInvoice, {
+    amount: 60.02,
+    paymentDate: '2026-11-21',
+    paymentMethod: 'eft',
+  });
+  assert.equal(over.ok, false);
+  assert.ok(over.fieldErrors.amount);
+
+  // Zero-balance unpaid (zero-total) invoice -> rejected even for 0.01
+  const zeroInvoice = makeInvoice(profile, client, {
+    grandTotal: 0,
+    amountPaid: 0,
+    outstandingBalance: 0,
+    status: 'sent',
+  });
+  const zeroAttempt = validatePaymentInput(zeroInvoice, {
+    amount: 0.01,
+    paymentDate: '2026-11-21',
+    paymentMethod: 'cash',
+  });
+  assert.equal(zeroAttempt.ok, false);
+  assert.ok(zeroAttempt.fieldErrors.balance);
+
+  // Paid invoice -> rejected even if outstandingBalance field were stale
+  const paidInvoice = makeInvoice(profile, client, {
+    grandTotal: 100,
+    amountPaid: 100,
+    outstandingBalance: 0,
+    status: 'paid',
+  });
+  const paidAttempt = validatePaymentInput(paidInvoice, {
+    amount: 0.01,
+    paymentDate: '2026-11-21',
+    paymentMethod: 'cash',
+  });
+  assert.equal(paidAttempt.ok, false);
+  assert.ok(paidAttempt.fieldErrors.balance);
+});
+
+test('Stage 3.2.2: BrowserPersistenceAdapter, StorageService, and SqlitePersistenceAdapter reject invalid payments pre-mutation and pre-IPC', async () => {
+  // 1. Browser adapter & StorageService
+  mockStorage.clear();
+  const browser = new BrowserPersistenceAdapter();
+  await browser.clearAllData();
+  const bProfile = await browser.saveBusinessProfile(makeProfile());
+  const bClient = await browser.saveClient(makeClient());
+  const bInv = await browser.saveInvoice(
+    makeInvoice(bProfile, bClient, {
+      id: 'inv_b_val',
+      invoiceNumber: 'INV-3220',
+      grandTotal: 100,
+      subtotal: 100,
+      taxRate: 0,
+      taxAmount: 0,
+      outstandingBalance: 100,
+      status: 'sent',
+      payments: [],
+    })
+  );
+
+  const invalidPayloads: Array<any> = [
+    { amount: 0, paymentDate: '2026-11-21', paymentMethod: 'eft' },
+    { amount: -25, paymentDate: '2026-11-21', paymentMethod: 'eft' },
+    { amount: NaN, paymentDate: '2026-11-21', paymentMethod: 'eft' },
+    { amount: Infinity, paymentDate: '2026-11-21', paymentMethod: 'eft' },
+    { amount: '100abc', paymentDate: '2026-11-21', paymentMethod: 'eft' },
+    { amount: '1e-5', paymentDate: '2026-11-21', paymentMethod: 'eft' },
+    { amount: 10.129, paymentDate: '2026-11-21', paymentMethod: 'eft' },
+    { amount: 10, paymentDate: '2025-02-29', paymentMethod: 'eft' },
+    { amount: 10, paymentDate: '   ', paymentMethod: 'eft' },
+    { amount: 10, paymentDate: '2026-11-21', paymentMethod: 'invalid_method' },
+    { amount: 100.02, paymentDate: '2026-11-21', paymentMethod: 'eft' },
+  ];
+
+  for (const payload of invalidPayloads) {
+    await assert.rejects(
+      () => browser.recordPayment(bInv.id, payload),
+      (err: unknown) => err instanceof PersistenceError && err.code === 'VALIDATION_ERROR'
+    );
+    assert.throws(
+      () => StorageService.recordPayment(bInv.id, payload),
+      (err: unknown) => err instanceof PersistenceError && err.code === 'VALIDATION_ERROR'
+    );
+  }
+
+  // Confirm failed attempts left stored invoice, payments, and activities completely untouched
+  const unchangedBrowser = await browser.getInvoiceById(bInv.id);
+  assert.equal(unchangedBrowser?.amountPaid, 0);
+  assert.equal(unchangedBrowser?.outstandingBalance, 100);
+  assert.equal(unchangedBrowser?.payments.length, 0);
+  assert.equal(unchangedBrowser?.status, 'sent');
+  assert.equal(
+    (await browser.getActivities()).some((a) => a.type === 'payment_recorded'),
+    false
+  );
+
+  // Valid tolerance payment (+0.01) settles invoice, then further payment is rejected
+  const settledBrowser = await browser.recordPayment(bInv.id, {
+    amount: 100.01,
+    paymentDate: undefined as unknown as string,
+    paymentMethod: 'bank_transfer',
+  });
+  assert.equal(settledBrowser?.status, 'paid');
+  assert.equal(settledBrowser?.outstandingBalance, 0);
+  assert.equal(settledBrowser?.payments[0].paymentDate, getLocalTodayDateString());
+
+  await assert.rejects(
+    () =>
+      browser.recordPayment(bInv.id, {
+        amount: 0.01,
+        paymentDate: '2026-11-21',
+        paymentMethod: 'cash',
+      }),
+    (err: unknown) => err instanceof PersistenceError && err.code === 'VALIDATION_ERROR'
+  );
+  assert.equal((await browser.getInvoiceById(bInv.id))?.payments.length, 1);
+
+  // 2. SQLite adapter: all invalid cases fail BEFORE Rust IPC bridge.createPayment is called
+  const spy = new WorkflowSqliteBridgeSpy();
+  const sqlite = new SqlitePersistenceAdapter({
+    bridge: spy as any,
+    now: () => '2026-11-21T23:55:00.000Z',
+  });
+  const sProfile = await sqlite.saveBusinessProfile(makeProfile());
+  const sClient = await sqlite.saveClient(makeClient());
+  const sInv = await sqlite.saveInvoice(
+    makeInvoice(sProfile, sClient, {
+      id: 'inv_s_val',
+      invoiceNumber: 'INV-3221',
+      grandTotal: 100,
+      subtotal: 100,
+      taxRate: 0,
+      taxAmount: 0,
+      outstandingBalance: 100,
+      status: 'sent',
+      payments: [],
+    })
+  );
+
+  spy.calls.length = 0;
+  for (const payload of invalidPayloads) {
+    await assert.rejects(
+      () => sqlite.recordPayment(sInv.id, payload),
+      (err: unknown) => err instanceof PersistenceError && err.code === 'VALIDATION_ERROR'
+    );
+  }
+  assert.equal(
+    spy.calls.includes('createPayment'),
+    false,
+    'Invalid payments must never reach Rust createPayment IPC'
+  );
+  assert.equal(spy.payments.size, 0);
+
+  // Valid SQLite payment with omitted date uses local date fallback (getLocalTodayDateString)
+  const settledSqlite = await sqlite.recordPayment(sInv.id, {
+    amount: 100.01,
+    paymentDate: undefined as unknown as string,
+    paymentMethod: 'bank_transfer',
+  });
+  assert.equal(settledSqlite?.status, 'paid');
+  assert.equal(settledSqlite?.payments[0].paymentDate, getLocalTodayDateString());
+
+  spy.calls.length = 0;
+  await assert.rejects(
+    () =>
+      sqlite.recordPayment(sInv.id, {
+        amount: 0.01,
+        paymentDate: '2026-11-21',
+        paymentMethod: 'cash',
+      }),
+    (err: unknown) => err instanceof PersistenceError && err.code === 'VALIDATION_ERROR'
+  );
+  assert.equal(spy.calls.includes('createPayment'), false);
+  assert.equal(spy.payments.size, 1);
+
+  // Confirm UTC date fallback is absent from storage.ts and sqliteAdapter.ts recordPayment paths
+  const storageSrc = readFileSync(resolve('src/services/storage.ts'), 'utf8');
+  const sqliteSrc = readFileSync(resolve('src/services/persistence/sqliteAdapter.ts'), 'utf8');
+  assert.equal(storageSrc.includes("paymentData.paymentDate || new Date().toISOString().split('T')[0]"), false);
+  assert.equal(sqliteSrc.includes("paymentData.paymentDate || this.now().split('T')[0]"), false);
+});
+
+test('Stage 3.2.2: zero-total invoice status matches Rust precision rules (draft/sent past due never overdue)', () => {
+  assert.equal(determineUpdatedInvoiceStatus('draft', 0, 0, '2020-01-01', '2026-11-21'), 'draft');
+  assert.equal(determineUpdatedInvoiceStatus('sent', 0, 0, '2020-01-01', '2026-11-21'), 'sent');
+  assert.equal(determineUpdatedInvoiceStatus('overdue', 0, 0, '2020-01-01', '2026-11-21'), 'sent');
+  assert.equal(determineUpdatedInvoiceStatus('overdue', 0, 0, '2099-01-01', '2026-11-21'), 'sent');
+  assert.equal(determineUpdatedInvoiceStatus('paid', 0, 0, '2020-01-01', '2026-11-21'), 'sent');
+  assert.equal(determineUpdatedInvoiceStatus('sent', 0, 50, '2020-01-01', '2026-11-21'), 'paid');
+  assert.equal(determineUpdatedInvoiceStatus('draft', 0, 1, '2020-01-01', '2026-11-21'), 'paid');
+
+  // Non-zero past-due unpaid invoice still becomes overdue
+  assert.equal(determineUpdatedInvoiceStatus('sent', 100, 0, '2020-01-01', '2026-11-21'), 'overdue');
 });
 

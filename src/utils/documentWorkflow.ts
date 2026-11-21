@@ -8,8 +8,388 @@ import type {
   QuotationStatus,
 } from '../types';
 import type { PersistenceAdapter } from '../services/persistence/types';
-import { determineUpdatedInvoiceStatus, getLocalTodayDateString } from './calculations';
-import { formatCurrency } from './formatters';
+import {
+  calculateInvoiceBalances,
+  determineUpdatedInvoiceStatus,
+  getLocalTodayDateString,
+} from './calculations';
+import { formatCurrency, getPaymentMethodLabel } from './formatters';
+
+export const CANONICAL_PAYMENT_METHODS: readonly PaymentMethod[] = [
+  'bank_transfer',
+  'cash',
+  'credit_card',
+  'eft',
+  'mobile_money',
+  'cheque',
+  'other',
+] as const;
+
+export const PAYMENT_METHOD_SELECT_OPTIONS: ReadonlyArray<{
+  value: PaymentMethod;
+  label: string;
+}> = [
+  { value: 'eft', label: getPaymentMethodLabel('eft') },
+  { value: 'bank_transfer', label: getPaymentMethodLabel('bank_transfer') },
+  { value: 'credit_card', label: getPaymentMethodLabel('credit_card') },
+  { value: 'cash', label: getPaymentMethodLabel('cash') },
+  { value: 'mobile_money', label: getPaymentMethodLabel('mobile_money') },
+  { value: 'cheque', label: getPaymentMethodLabel('cheque') },
+  { value: 'other', label: getPaymentMethodLabel('other') },
+];
+
+export interface StrictAmountParseResult {
+  ok: boolean;
+  amount?: number;
+  amountMinor?: number;
+  error?: string;
+}
+
+export function parseStrictPaymentAmount(rawAmount: unknown): StrictAmountParseResult {
+  if (typeof rawAmount !== 'string' && typeof rawAmount !== 'number') {
+    return {
+      ok: false,
+      error: 'Please enter a valid payment amount greater than zero.',
+    };
+  }
+
+  let decimalText: string;
+  if (typeof rawAmount === 'number') {
+    if (!Number.isFinite(rawAmount)) {
+      return {
+        ok: false,
+        error: 'Please enter a valid finite payment amount.',
+      };
+    }
+    if (rawAmount <= 0) {
+      return {
+        ok: false,
+        error: 'Payment amount must be greater than zero.',
+      };
+    }
+    decimalText = String(rawAmount);
+  } else {
+    decimalText = rawAmount.trim();
+    if (!decimalText) {
+      return {
+        ok: false,
+        error: 'Please enter a payment amount greater than zero.',
+      };
+    }
+  }
+
+  if (/[eE]/.test(decimalText)) {
+    return {
+      ok: false,
+      error: 'Scientific notation is not allowed. Please enter a standard decimal amount.',
+    };
+  }
+
+  const match = /^(-)?(?:(\d+)(?:\.(\d+))?|\.(\d+))$/.exec(decimalText);
+  if (!match) {
+    return {
+      ok: false,
+      error: 'Please enter a valid numeric payment amount (up to 2 decimal places).',
+    };
+  }
+
+  const isNegative = Boolean(match[1]);
+  const wholeDigits = match[2] ?? '0';
+  const fracDigits = match[3] ?? match[4] ?? '';
+
+  if (isNegative) {
+    return {
+      ok: false,
+      error: 'Payment amount must be greater than zero.',
+    };
+  }
+
+  if (fracDigits.length > 2) {
+    return {
+      ok: false,
+      error: 'Payment amount cannot have more than 2 decimal places.',
+    };
+  }
+
+  const wholeValue = Number(wholeDigits);
+  const centsPart = Number(fracDigits.padEnd(2, '0'));
+  const amountMinor = wholeValue * 100 + centsPart;
+
+  if (!Number.isSafeInteger(amountMinor) || amountMinor > 9007199254740991) {
+    return {
+      ok: false,
+      error: 'Payment amount is too large.',
+    };
+  }
+
+  if (amountMinor <= 0) {
+    return {
+      ok: false,
+      error: 'Payment amount must be greater than zero.',
+    };
+  }
+
+  return {
+    ok: true,
+    amount: Number((amountMinor / 100).toFixed(2)),
+    amountMinor,
+  };
+}
+
+function isLeapYear(year: number): boolean {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+function getDaysInCalendarMonth(year: number, month: number): number | null {
+  switch (month) {
+    case 1:
+    case 3:
+    case 5:
+    case 7:
+    case 8:
+    case 10:
+    case 12:
+      return 31;
+    case 4:
+    case 6:
+    case 9:
+    case 11:
+      return 30;
+    case 2:
+      return isLeapYear(year) ? 29 : 28;
+    default:
+      return null;
+  }
+}
+
+export interface PaymentDateValidationResult {
+  ok: boolean;
+  paymentDate?: string;
+  error?: string;
+}
+
+export function validatePaymentDate(
+  rawDate: unknown,
+  options: { allowOmittedFallback?: boolean; today?: string } = {}
+): PaymentDateValidationResult {
+  const { allowOmittedFallback = true, today } = options;
+
+  if (rawDate === undefined || rawDate === null) {
+    if (allowOmittedFallback) {
+      return {
+        ok: true,
+        paymentDate: today || getLocalTodayDateString(),
+      };
+    }
+    return {
+      ok: false,
+      error: 'Payment date is required in YYYY-MM-DD format.',
+    };
+  }
+
+  if (typeof rawDate !== 'string') {
+    return {
+      ok: false,
+      error: 'Payment date must be a valid date in YYYY-MM-DD format.',
+    };
+  }
+
+  if (rawDate.trim().length === 0) {
+    return {
+      ok: false,
+      error: 'Payment date is required in YYYY-MM-DD format.',
+    };
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
+    return {
+      ok: false,
+      error: 'Payment date must use strict YYYY-MM-DD format.',
+    };
+  }
+
+  const year = Number(rawDate.slice(0, 4));
+  const month = Number(rawDate.slice(5, 7));
+  const day = Number(rawDate.slice(8, 10));
+
+  if (!Number.isInteger(year) || year < 1 || year > 9999) {
+    return {
+      ok: false,
+      error: 'Payment date has an out-of-range year.',
+    };
+  }
+
+  const maxDay = getDaysInCalendarMonth(year, month);
+  if (!maxDay) {
+    return {
+      ok: false,
+      error: 'Payment date has an invalid month.',
+    };
+  }
+
+  if (!Number.isInteger(day) || day < 1 || day > maxDay) {
+    return {
+      ok: false,
+      error: 'Payment date is not a valid calendar date.',
+    };
+  }
+
+  return {
+    ok: true,
+    paymentDate: rawDate,
+  };
+}
+
+export function validatePaymentMethodValue(
+  method: unknown
+): { ok: boolean; paymentMethod?: PaymentMethod; error?: string } {
+  if (
+    typeof method === 'string' &&
+    (CANONICAL_PAYMENT_METHODS as readonly string[]).includes(method)
+  ) {
+    return { ok: true, paymentMethod: method as PaymentMethod };
+  }
+  return {
+    ok: false,
+    error: 'Please select a valid payment method.',
+  };
+}
+
+export interface PaymentValidationFieldErrors {
+  balance?: string;
+  amount?: string;
+  paymentDate?: string;
+  paymentMethod?: string;
+}
+
+export interface ValidatedPaymentPayload {
+  amount: number;
+  amountMinor: number;
+  paymentDate: string;
+  paymentMethod: PaymentMethod;
+  reference?: string;
+  notes?: string;
+}
+
+export type PaymentValidationResult =
+  | {
+      ok: true;
+      value: ValidatedPaymentPayload;
+      fieldErrors: PaymentValidationFieldErrors;
+    }
+  | {
+      ok: false;
+      error: string;
+      fieldErrors: PaymentValidationFieldErrors;
+    };
+
+export type PaymentValidationInvoice = Pick<
+  Invoice,
+  'status' | 'grandTotal' | 'outstandingBalance' | 'currency' | 'currencySymbol'
+> & {
+  payments?: PaymentRecord[];
+};
+
+export interface PaymentValidationRawInput {
+  amount: string | number;
+  paymentDate?: string | null;
+  paymentMethod: unknown;
+  reference?: string;
+  notes?: string;
+}
+
+export function getInvoiceRemainingBalanceMinor(invoice: PaymentValidationInvoice): number {
+  const hasFiniteBalance =
+    typeof invoice.outstandingBalance === 'number' &&
+    Number.isFinite(invoice.outstandingBalance);
+  const rawBalance = hasFiniteBalance
+    ? invoice.outstandingBalance
+    : calculateInvoiceBalances(invoice.grandTotal, invoice.payments ?? []).outstandingBalance;
+  return Math.max(0, Math.round((Number(rawBalance) || 0) * 100));
+}
+
+export function validatePaymentInput(
+  invoice: PaymentValidationInvoice,
+  input: PaymentValidationRawInput,
+  options: { requireExplicitDate?: boolean; today?: string } = {}
+): PaymentValidationResult {
+  const fieldErrors: PaymentValidationFieldErrors = {};
+  const grandTotalMinor = Math.max(0, Math.round((Number(invoice.grandTotal) || 0) * 100));
+  const balanceMinor = getInvoiceRemainingBalanceMinor(invoice);
+  const currency = invoice.currency || 'NAD';
+  const currencySymbol = invoice.currencySymbol || 'N$';
+
+  if (invoice.status === 'paid') {
+    fieldErrors.balance = 'This invoice is already paid and cannot accept additional payments.';
+  } else if (grandTotalMinor <= 0 || balanceMinor <= 0) {
+    fieldErrors.balance = 'This invoice has no outstanding balance remaining.';
+  }
+
+  const amountResult = parseStrictPaymentAmount(input.amount);
+  if (!amountResult.ok) {
+    fieldErrors.amount = amountResult.error;
+  } else if (
+    !fieldErrors.balance &&
+    amountResult.amountMinor !== undefined &&
+    amountResult.amountMinor > balanceMinor + 1
+  ) {
+    const balanceDisplay = formatCurrency(balanceMinor / 100, currency, currencySymbol);
+    fieldErrors.amount = `Amount cannot exceed the remaining balance of ${balanceDisplay}.`;
+  }
+
+  const dateResult = validatePaymentDate(input.paymentDate, {
+    allowOmittedFallback: !options.requireExplicitDate,
+    today: options.today,
+  });
+  if (!dateResult.ok) {
+    fieldErrors.paymentDate = dateResult.error;
+  }
+
+  const methodResult = validatePaymentMethodValue(input.paymentMethod);
+  if (!methodResult.ok) {
+    fieldErrors.paymentMethod = methodResult.error;
+  }
+
+  const firstError =
+    fieldErrors.balance ||
+    fieldErrors.amount ||
+    fieldErrors.paymentDate ||
+    fieldErrors.paymentMethod;
+
+  if (
+    firstError ||
+    !amountResult.ok ||
+    amountResult.amount === undefined ||
+    amountResult.amountMinor === undefined ||
+    !dateResult.ok ||
+    !dateResult.paymentDate ||
+    !methodResult.ok ||
+    !methodResult.paymentMethod
+  ) {
+    return {
+      ok: false,
+      error: firstError || 'Please check the payment details and try again.',
+      fieldErrors,
+    };
+  }
+
+  const trimmedReference =
+    typeof input.reference === 'string' ? input.reference.trim() : undefined;
+  const trimmedNotes = typeof input.notes === 'string' ? input.notes.trim() : undefined;
+
+  return {
+    ok: true,
+    fieldErrors: {},
+    value: {
+      amount: amountResult.amount,
+      amountMinor: amountResult.amountMinor,
+      paymentDate: dateResult.paymentDate,
+      paymentMethod: methodResult.paymentMethod,
+      reference: trimmedReference ? trimmedReference : undefined,
+      notes: trimmedNotes ? trimmedNotes : undefined,
+    },
+  };
+}
 
 export interface PaymentModalFormState {
   amount: number;

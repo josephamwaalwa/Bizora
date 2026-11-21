@@ -10,6 +10,7 @@ import {
   calculateInvoiceBalances,
   determineUpdatedInvoiceStatus,
 } from '../../utils/calculations';
+import { validatePaymentInput } from '../../utils/documentWorkflow';
 import {
   getStoredTheme,
   isValidThemeMode,
@@ -263,7 +264,46 @@ export class BrowserPersistenceAdapter implements PersistenceAdapter {
   }
 
   async recordPayment(invoiceId: string, paymentData: NewPaymentInput): Promise<Invoice | undefined> {
-    return this.storage.recordPayment(invoiceId, paymentData);
+    const existing = this.storage.getInvoiceById(invoiceId);
+    if (!existing) return undefined;
+
+    const currentBalances = calculateInvoiceBalances(existing.grandTotal, existing.payments || []);
+    const storedBalance =
+      typeof existing.outstandingBalance === 'number' && Number.isFinite(existing.outstandingBalance)
+        ? Math.max(0, existing.outstandingBalance)
+        : currentBalances.outstandingBalance;
+    const effectiveBalance = Math.min(storedBalance, currentBalances.outstandingBalance);
+
+    const validation = validatePaymentInput(
+      {
+        status: existing.status,
+        grandTotal: existing.grandTotal,
+        outstandingBalance: effectiveBalance,
+        currency: existing.currency,
+        currencySymbol: existing.currencySymbol,
+        payments: existing.payments,
+      },
+      {
+        amount: paymentData.amount,
+        paymentDate: paymentData.paymentDate,
+        paymentMethod: paymentData.paymentMethod,
+        reference: paymentData.reference,
+        notes: paymentData.notes,
+      },
+      { requireExplicitDate: false }
+    );
+
+    if (!validation.ok) {
+      throw new PersistenceError('VALIDATION_ERROR', validation.error);
+    }
+
+    return this.storage.recordPayment(invoiceId, {
+      amount: validation.value.amount,
+      paymentDate: validation.value.paymentDate,
+      paymentMethod: validation.value.paymentMethod,
+      reference: validation.value.reference,
+      notes: validation.value.notes,
+    });
   }
 
   async deletePayment(paymentId: string): Promise<void> {

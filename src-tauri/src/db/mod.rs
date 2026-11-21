@@ -2455,13 +2455,29 @@ mod tests {
 
     #[test]
     fn zero_total_invoice_payment_state_and_active_asset_delete_timestamp() {
-        // 4A. Zero-total unit state checks
+        // 4A. Zero-total unit state checks (including past-due normalization parity)
         assert_eq!(
             precision::recompute_invoice_payment_state("draft", 0, &[], false).unwrap(),
             (0, 0, "draft")
         );
         assert_eq!(
+            precision::recompute_invoice_payment_state("draft", 0, &[], true).unwrap(),
+            (0, 0, "draft")
+        );
+        assert_eq!(
             precision::recompute_invoice_payment_state("sent", 0, &[], false).unwrap(),
+            (0, 0, "sent")
+        );
+        assert_eq!(
+            precision::recompute_invoice_payment_state("sent", 0, &[], true).unwrap(),
+            (0, 0, "sent")
+        );
+        assert_eq!(
+            precision::recompute_invoice_payment_state("overdue", 0, &[], true).unwrap(),
+            (0, 0, "sent")
+        );
+        assert_eq!(
+            precision::recompute_invoice_payment_state("overdue", 0, &[], false).unwrap(),
             (0, 0, "sent")
         );
         assert_eq!(
@@ -2477,7 +2493,8 @@ mod tests {
         let seeded_biz = seed_business(&mut conn, "biz_1");
         seed_client(&mut conn, "biz_1", "cli_1");
 
-        // Zero-total invoice with payment transitions to 'paid' and reverts to 'sent' if deleted
+        // Positive-total invoice receives a payment, then invoice total is edited down to 0
+        // -> existing payment remains preserved ('paid') and reverts to 'sent' if deleted
         repositories::invoice_repository::create_invoice(
             &mut conn,
             &dto::CreateInvoiceInput {
@@ -2490,10 +2507,10 @@ mod tests {
                 client_snapshot_json: "{}".to_string(),
                 business_snapshot_json: "{}".to_string(),
                 issue_date: "2026-11-16".to_string(),
-                due_date: None,
+                due_date: Some("2020-01-01".to_string()),
                 currency: "NAD".to_string(),
                 currency_symbol: "N$".to_string(),
-                subtotal_minor: precision::SafeI64(0),
+                subtotal_minor: precision::SafeI64(500),
                 discount_type: "percentage".to_string(),
                 discount_percentage_ppm: precision::SafeI64(0),
                 discount_fixed_minor: precision::SafeI64(0),
@@ -2501,14 +2518,14 @@ mod tests {
                 tax_name: "VAT".to_string(),
                 tax_rate_ppm: precision::SafeI64(0),
                 tax_amount_minor: precision::SafeI64(0),
-                grand_total_minor: precision::SafeI64(0),
+                grand_total_minor: precision::SafeI64(500),
                 amount_paid_minor: precision::SafeI64(0),
-                outstanding_balance_minor: precision::SafeI64(0),
+                outstanding_balance_minor: precision::SafeI64(500),
                 status: "sent".to_string(),
                 notes: None,
                 terms: None,
                 payment_instructions: None,
-                items: vec![],
+                items: vec![sample_item("ii_zero", Some(0), 1_000_000, 5_000_000, 500)],
                 created_at: None,
                 updated_at: None,
             },
@@ -2532,9 +2549,39 @@ mod tests {
         )
         .unwrap();
 
-        let zero_paid = repositories::invoice_repository::get_invoice_by_id(&conn, "inv_zero")
-            .unwrap()
-            .unwrap();
+        let zero_paid = repositories::invoice_repository::update_invoice(
+            &mut conn,
+            &dto::UpdateInvoiceInput {
+                id: "inv_zero".to_string(),
+                business_id: "biz_1".to_string(),
+                client_id: Some("cli_1".to_string()),
+                quotation_id: None,
+                invoice_number: "INV-ZERO".to_string(),
+                client_snapshot_json: "{}".to_string(),
+                business_snapshot_json: "{}".to_string(),
+                issue_date: "2026-11-16".to_string(),
+                due_date: Some("2020-01-01".to_string()),
+                currency: "NAD".to_string(),
+                currency_symbol: "N$".to_string(),
+                subtotal_minor: precision::SafeI64(0),
+                discount_type: "percentage".to_string(),
+                discount_percentage_ppm: precision::SafeI64(0),
+                discount_fixed_minor: precision::SafeI64(0),
+                discount_amount_minor: precision::SafeI64(0),
+                tax_name: "VAT".to_string(),
+                tax_rate_ppm: precision::SafeI64(0),
+                tax_amount_minor: precision::SafeI64(0),
+                grand_total_minor: precision::SafeI64(0),
+                amount_paid_minor: precision::SafeI64(250),
+                outstanding_balance_minor: precision::SafeI64(0),
+                status: "paid".to_string(),
+                notes: None,
+                terms: None,
+                payment_instructions: None,
+                items: vec![],
+            },
+        )
+        .unwrap();
         assert_eq!(zero_paid.amount_paid_minor.get(), 250);
         assert_eq!(zero_paid.outstanding_balance_minor.get(), 0);
         assert_eq!(zero_paid.status, "paid");
@@ -2947,6 +2994,231 @@ mod tests {
         assert_eq!(successes.len(), 1, "exactly one concurrent invoice link must succeed");
         assert_eq!(failures.len(), 1, "conflicting concurrent invoice link must fail");
         assert!(matches!(failures[0], Err(DbError::UniqueConstraint(_))));
+    }
+
+    #[test]
+    fn payment_recording_enforces_balance_overpayment_and_zero_total_guards() {
+        let (_temp, _manager, mut conn) = init_test_db("payment_guards");
+        seed_business(&mut conn, "biz_1");
+        seed_client(&mut conn, "biz_1", "cli_1");
+
+        // 1. Standard N$100.00 invoice
+        repositories::invoice_repository::create_invoice(
+            &mut conn,
+            &dto::CreateInvoiceInput {
+                id: "inv_guard".to_string(),
+                business_id: "biz_1".to_string(),
+                legacy_id: None,
+                client_id: Some("cli_1".to_string()),
+                quotation_id: None,
+                invoice_number: "INV-GUARD".to_string(),
+                client_snapshot_json: "{}".to_string(),
+                business_snapshot_json: "{}".to_string(),
+                issue_date: "2026-11-16".to_string(),
+                due_date: Some("2099-12-31".to_string()),
+                currency: "NAD".to_string(),
+                currency_symbol: "N$".to_string(),
+                subtotal_minor: precision::SafeI64(10_000),
+                discount_type: "percentage".to_string(),
+                discount_percentage_ppm: precision::SafeI64(0),
+                discount_fixed_minor: precision::SafeI64(0),
+                discount_amount_minor: precision::SafeI64(0),
+                tax_name: "VAT".to_string(),
+                tax_rate_ppm: precision::SafeI64(0),
+                tax_amount_minor: precision::SafeI64(0),
+                grand_total_minor: precision::SafeI64(10_000),
+                amount_paid_minor: precision::SafeI64(0),
+                outstanding_balance_minor: precision::SafeI64(10_000),
+                status: "sent".to_string(),
+                notes: None,
+                terms: None,
+                payment_instructions: None,
+                items: vec![sample_item("ii_g1", Some(0), 1_000_000, 100_000_000, 10_000)],
+                created_at: None,
+                updated_at: None,
+            },
+        )
+        .unwrap();
+
+        // Reject overpayment exceeding outstanding_balance + 1 minor unit (100.02 -> 10_002)
+        let overpay_err = repositories::payment_repository::create_payment(
+            &mut conn,
+            &dto::CreatePaymentInput {
+                id: "pay_over".to_string(),
+                business_id: "biz_1".to_string(),
+                invoice_id: "inv_guard".to_string(),
+                legacy_id: None,
+                amount_minor: precision::SafeI64(10_002),
+                payment_date: "2026-11-16".to_string(),
+                payment_method: "eft".to_string(),
+                reference: None,
+                notes: None,
+                recorded_at: None,
+            },
+        )
+        .expect_err("overpayment above 1 minor-unit tolerance must fail");
+        assert!(matches!(overpay_err, DbError::InvalidInput { .. }));
+        assert_eq!(
+            repositories::payment_repository::get_payments_by_invoice(&conn, "inv_guard")
+                .unwrap()
+                .len(),
+            0
+        );
+
+        // Partial N$40.00 then N$60.01 (within +0.01 tolerance) -> succeeds and settles invoice
+        repositories::payment_repository::create_payment(
+            &mut conn,
+            &dto::CreatePaymentInput {
+                id: "pay_part1".to_string(),
+                business_id: "biz_1".to_string(),
+                invoice_id: "inv_guard".to_string(),
+                legacy_id: None,
+                amount_minor: precision::SafeI64(4_000),
+                payment_date: "2026-11-16".to_string(),
+                payment_method: "eft".to_string(),
+                reference: None,
+                notes: None,
+                recorded_at: None,
+            },
+        )
+        .unwrap();
+
+        repositories::payment_repository::create_payment(
+            &mut conn,
+            &dto::CreatePaymentInput {
+                id: "pay_tol".to_string(),
+                business_id: "biz_1".to_string(),
+                invoice_id: "inv_guard".to_string(),
+                legacy_id: None,
+                amount_minor: precision::SafeI64(6_001),
+                payment_date: "2026-11-17".to_string(),
+                payment_method: "bank_transfer".to_string(),
+                reference: None,
+                notes: None,
+                recorded_at: None,
+            },
+        )
+        .unwrap();
+
+        let settled = repositories::invoice_repository::get_invoice_by_id(&conn, "inv_guard")
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.status, "paid");
+        assert_eq!(settled.outstanding_balance_minor.get(), 0);
+
+        // Reject subsequent payment on paid / zero-balance invoice
+        let paid_err = repositories::payment_repository::create_payment(
+            &mut conn,
+            &dto::CreatePaymentInput {
+                id: "pay_after_paid".to_string(),
+                business_id: "biz_1".to_string(),
+                invoice_id: "inv_guard".to_string(),
+                legacy_id: None,
+                amount_minor: precision::SafeI64(1),
+                payment_date: "2026-11-18".to_string(),
+                payment_method: "cash".to_string(),
+                reference: None,
+                notes: None,
+                recorded_at: None,
+            },
+        )
+        .expect_err("payment against paid invoice must fail");
+        assert!(matches!(paid_err, DbError::InvalidInput { .. }));
+
+        // Verify downward invoice edit below existing payments remains supported
+        let reduced = repositories::invoice_repository::update_invoice(
+            &mut conn,
+            &dto::UpdateInvoiceInput {
+                id: "inv_guard".to_string(),
+                business_id: "biz_1".to_string(),
+                client_id: Some("cli_1".to_string()),
+                quotation_id: None,
+                invoice_number: "INV-GUARD".to_string(),
+                client_snapshot_json: "{}".to_string(),
+                business_snapshot_json: "{}".to_string(),
+                issue_date: "2026-11-16".to_string(),
+                due_date: Some("2099-12-31".to_string()),
+                currency: "NAD".to_string(),
+                currency_symbol: "N$".to_string(),
+                subtotal_minor: precision::SafeI64(5_000),
+                discount_type: "percentage".to_string(),
+                discount_percentage_ppm: precision::SafeI64(0),
+                discount_fixed_minor: precision::SafeI64(0),
+                discount_amount_minor: precision::SafeI64(0),
+                tax_name: "VAT".to_string(),
+                tax_rate_ppm: precision::SafeI64(0),
+                tax_amount_minor: precision::SafeI64(0),
+                grand_total_minor: precision::SafeI64(5_000),
+                amount_paid_minor: precision::SafeI64(10_001),
+                outstanding_balance_minor: precision::SafeI64(0),
+                status: "paid".to_string(),
+                notes: None,
+                terms: None,
+                payment_instructions: None,
+                items: vec![sample_item("ii_g1", Some(0), 1_000_000, 50_000_000, 5_000)],
+            },
+        )
+        .unwrap();
+        assert_eq!(reduced.amount_paid_minor.get(), 10_001);
+        assert_eq!(reduced.outstanding_balance_minor.get(), 0);
+        assert_eq!(reduced.status, "paid");
+
+        // 2. Zero-total past-due invoice normalizes to 'sent' (not 'overdue') and rejects new payments
+        let zero_past_due = repositories::invoice_repository::create_invoice(
+            &mut conn,
+            &dto::CreateInvoiceInput {
+                id: "inv_zero_due".to_string(),
+                business_id: "biz_1".to_string(),
+                legacy_id: None,
+                client_id: Some("cli_1".to_string()),
+                quotation_id: None,
+                invoice_number: "INV-ZERO-DUE".to_string(),
+                client_snapshot_json: "{}".to_string(),
+                business_snapshot_json: "{}".to_string(),
+                issue_date: "2026-11-16".to_string(),
+                due_date: Some("2020-01-01".to_string()),
+                currency: "NAD".to_string(),
+                currency_symbol: "N$".to_string(),
+                subtotal_minor: precision::SafeI64(0),
+                discount_type: "percentage".to_string(),
+                discount_percentage_ppm: precision::SafeI64(0),
+                discount_fixed_minor: precision::SafeI64(0),
+                discount_amount_minor: precision::SafeI64(0),
+                tax_name: "VAT".to_string(),
+                tax_rate_ppm: precision::SafeI64(0),
+                tax_amount_minor: precision::SafeI64(0),
+                grand_total_minor: precision::SafeI64(0),
+                amount_paid_minor: precision::SafeI64(0),
+                outstanding_balance_minor: precision::SafeI64(0),
+                status: "overdue".to_string(),
+                notes: None,
+                terms: None,
+                payment_instructions: None,
+                items: vec![],
+                created_at: None,
+                updated_at: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(zero_past_due.status, "sent");
+
+        let zero_pay_err = repositories::payment_repository::create_payment(
+            &mut conn,
+            &dto::CreatePaymentInput {
+                id: "pay_on_zero".to_string(),
+                business_id: "biz_1".to_string(),
+                invoice_id: "inv_zero_due".to_string(),
+                legacy_id: None,
+                amount_minor: precision::SafeI64(1),
+                payment_date: "2026-11-18".to_string(),
+                payment_method: "cash".to_string(),
+                reference: None,
+                notes: None,
+                recorded_at: None,
+            },
+        )
+        .expect_err("payment on zero-total invoice must fail even for 1 minor unit");
+        assert!(matches!(zero_pay_err, DbError::InvalidInput { .. }));
     }
 }
 

@@ -7,8 +7,11 @@ import {
   initialActivities,
 } from './seedData';
 import { calculateInvoiceBalances, determineUpdatedInvoiceStatus } from '../utils/calculations';
+import { formatCurrency } from '../utils/formatters';
+import { validatePaymentInput } from '../utils/documentWorkflow';
 import { formatDocNumber, generateId } from '../utils/idGenerator';
 import { THEME_STORAGE_KEY } from '../utils/theme';
+import { PersistenceError } from './persistence/types';
 
 const KEYS = {
   PROFILE: 'bizora_business_profile_v1',
@@ -1158,14 +1161,44 @@ export const StorageService = {
     const invoice = this.getInvoiceById(invoiceId);
     if (!invoice) return undefined;
 
+    const currentBalances = calculateInvoiceBalances(invoice.grandTotal, invoice.payments || []);
+    const storedBalance =
+      typeof invoice.outstandingBalance === 'number' && Number.isFinite(invoice.outstandingBalance)
+        ? Math.max(0, invoice.outstandingBalance)
+        : currentBalances.outstandingBalance;
+    const effectiveBalance = Math.min(storedBalance, currentBalances.outstandingBalance);
+
+    const validation = validatePaymentInput(
+      {
+        status: invoice.status,
+        grandTotal: invoice.grandTotal,
+        outstandingBalance: effectiveBalance,
+        currency: invoice.currency,
+        currencySymbol: invoice.currencySymbol,
+        payments: invoice.payments,
+      },
+      {
+        amount: paymentData.amount,
+        paymentDate: paymentData.paymentDate,
+        paymentMethod: paymentData.paymentMethod,
+        reference: paymentData.reference,
+        notes: paymentData.notes,
+      },
+      { requireExplicitDate: false }
+    );
+
+    if (!validation.ok) {
+      throw new PersistenceError('VALIDATION_ERROR', validation.error);
+    }
+
     const newPayment: PaymentRecord = {
       id: generateId('pay'),
       invoiceId,
-      amount: Number(paymentData.amount) || 0,
-      paymentDate: paymentData.paymentDate || new Date().toISOString().split('T')[0],
-      paymentMethod: paymentData.paymentMethod,
-      reference: paymentData.reference,
-      notes: paymentData.notes,
+      amount: validation.value.amount,
+      paymentDate: validation.value.paymentDate,
+      paymentMethod: validation.value.paymentMethod,
+      reference: validation.value.reference,
+      notes: validation.value.notes,
       recordedAt: new Date().toISOString(),
     };
 
@@ -1187,8 +1220,8 @@ export const StorageService = {
 
     this.addActivity({
       type: 'payment_recorded',
-      title: `Payment of ${invoice.currencySymbol} ${newPayment.amount.toLocaleString()} Recorded`,
-      description: `Applied to ${invoice.invoiceNumber}. Remaining balance: ${invoice.currencySymbol} ${outstandingBalance.toLocaleString()}`,
+      title: `Payment of ${formatCurrency(newPayment.amount, invoice.currency, invoice.currencySymbol)} Recorded`,
+      description: `Applied to ${invoice.invoiceNumber}. Remaining balance: ${formatCurrency(outstandingBalance, invoice.currency, invoice.currencySymbol)}`,
       referenceId: invoice.id,
     });
 

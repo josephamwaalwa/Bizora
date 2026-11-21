@@ -9,6 +9,8 @@ import type {
   Quotation,
 } from '../../types';
 import { formatDocNumber, generateId } from '../../utils/idGenerator';
+import { formatCurrency } from '../../utils/formatters';
+import { validatePaymentInput } from '../../utils/documentWorkflow';
 import {
   DesktopDatabaseService,
   scaledInt64ToDecimal,
@@ -1295,16 +1297,38 @@ export class SqlitePersistenceAdapter implements PersistenceAdapter {
     const existingDto = await this.bridge.getInvoiceById(invoiceId);
     if (!existingDto) return undefined;
 
-    const amountMinor = strictDecimalToScaledInt64(paymentData.amount, 2, 'amount');
+    const validation = validatePaymentInput(
+      {
+        status: existingDto.status,
+        grandTotal: scaledToNumber(existingDto.grandTotalMinor, 2),
+        outstandingBalance: scaledToNumber(existingDto.outstandingBalanceMinor, 2),
+        currency: existingDto.currency,
+        currencySymbol: existingDto.currencySymbol,
+      },
+      {
+        amount: paymentData.amount,
+        paymentDate: paymentData.paymentDate,
+        paymentMethod: paymentData.paymentMethod,
+        reference: paymentData.reference,
+        notes: paymentData.notes,
+      },
+      { requireExplicitDate: false }
+    );
+
+    if (!validation.ok) {
+      throw new PersistenceError('VALIDATION_ERROR', validation.error);
+    }
+
+    const amountMinor = strictDecimalToScaledInt64(validation.value.amount, 2, 'amount');
     const createdPayment = await this.bridge.createPayment({
       id: generateId('pay'),
       businessId: existingDto.businessId,
       invoiceId: existingDto.id,
       amountMinor,
-      paymentDate: paymentData.paymentDate || this.now().split('T')[0],
-      paymentMethod: paymentData.paymentMethod,
-      reference: paymentData.reference ?? null,
-      notes: paymentData.notes ?? null,
+      paymentDate: validation.value.paymentDate,
+      paymentMethod: validation.value.paymentMethod,
+      reference: validation.value.reference ?? null,
+      notes: validation.value.notes ?? null,
       recordedAt: this.now(),
     });
 
@@ -1320,8 +1344,8 @@ export class SqlitePersistenceAdapter implements PersistenceAdapter {
     const paymentAmount = scaledToNumber(createdPayment.amountMinor, 2);
     await this.addActivity({
       type: 'payment_recorded',
-      title: `Payment of ${refreshed.currencySymbol} ${paymentAmount.toLocaleString()} Recorded`,
-      description: `Applied to ${refreshed.invoiceNumber}. Remaining balance: ${refreshed.currencySymbol} ${refreshed.outstandingBalance.toLocaleString()}`,
+      title: `Payment of ${formatCurrency(paymentAmount, refreshed.currency, refreshed.currencySymbol)} Recorded`,
+      description: `Applied to ${refreshed.invoiceNumber}. Remaining balance: ${formatCurrency(refreshed.outstandingBalance, refreshed.currency, refreshed.currencySymbol)}`,
       referenceId: refreshed.id,
     });
 
