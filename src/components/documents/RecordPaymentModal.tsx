@@ -6,41 +6,54 @@ import { Input } from '../common/Input';
 import { Select } from '../common/Select';
 import { Textarea } from '../common/Textarea';
 import { formatCurrency } from '../../utils/formatters';
-import type { PaymentMethod } from '../../types';
+import {
+  createInitialPaymentFormState,
+  getPaymentModalResetKey,
+} from '../../utils/documentWorkflow';
+import type { Invoice, PaymentMethod } from '../../types';
+import type { NewPaymentInput } from '../../services/persistence';
 import { CreditCard } from 'lucide-react';
 
-export const RecordPaymentModal: React.FC = () => {
-  const { paymentModalInvoice, closePaymentModal, recordPayment } = useApp();
+interface RecordPaymentModalContentProps {
+  invoice: Invoice;
+  onClose: () => void;
+  onSubmit: (invoiceId: string, paymentData: NewPaymentInput) => Promise<Invoice | undefined>;
+}
 
-  const invoice = paymentModalInvoice;
-  const balance = invoice?.outstandingBalance ?? 0;
+const RecordPaymentModalContent: React.FC<RecordPaymentModalContentProps> = ({
+  invoice,
+  onClose,
+  onSubmit,
+}) => {
+  const balance = Math.max(0, Number(invoice.outstandingBalance) || 0);
+  const initialState = createInitialPaymentFormState(invoice);
 
-  const [amount, setAmount] = useState<number>(balance);
-  const [paymentDate, setPaymentDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('eft');
-  const [reference, setReference] = useState<string>('');
-  const [notes, setNotes] = useState<string>('');
-  const [error, setError] = useState<string>('');
+  const [amountInput, setAmountInput] = useState<string>(initialState.amountInput);
+  const [paymentDate, setPaymentDate] = useState<string>(initialState.paymentDate);
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>(initialState.paymentMethod);
+  const [reference, setReference] = useState<string>(initialState.reference);
+  const [notes, setNotes] = useState<string>(initialState.notes);
+  const [error, setError] = useState<string>(initialState.error);
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  if (!invoice) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
-    const numAmount = Number(amount);
-    if (!numAmount || numAmount <= 0) {
+    const numAmount = parseFloat(amountInput);
+    if (!Number.isFinite(numAmount) || numAmount <= 0) {
       setError('Please enter a valid payment amount greater than zero.');
       return;
     }
     if (numAmount > balance + 0.01) {
-      setError(`Amount cannot exceed the remaining balance of ${formatCurrency(balance, invoice.currency, invoice.currencySymbol)}`);
+      setError(
+        `Amount cannot exceed the remaining balance of ${formatCurrency(balance, invoice.currency, invoice.currencySymbol)}`
+      );
       return;
     }
 
     setIsSubmitting(true);
     try {
-      await recordPayment(invoice.id, {
+      await onSubmit(invoice.id, {
         amount: numAmount,
         paymentDate,
         paymentMethod,
@@ -54,8 +67,8 @@ export const RecordPaymentModal: React.FC = () => {
 
   return (
     <Modal
-      isOpen={!!invoice}
-      onClose={closePaymentModal}
+      isOpen
+      onClose={onClose}
       title={
         <div className="flex items-center gap-2">
           <CreditCard className="w-4 h-4 text-ink-secondary" />
@@ -87,10 +100,10 @@ export const RecordPaymentModal: React.FC = () => {
           type="number"
           step="0.01"
           min="0.01"
-          max={balance}
-          value={amount}
+          max={balance > 0 ? Number((balance + 0.01).toFixed(2)) : undefined}
+          value={amountInput}
           onChange={(e) => {
-            setAmount(parseFloat(e.target.value) || 0);
+            setAmountInput(e.target.value);
             setError('');
           }}
           leftAddon={invoice.currencySymbol}
@@ -139,7 +152,7 @@ export const RecordPaymentModal: React.FC = () => {
         />
 
         <div className="flex items-center justify-end gap-2 pt-3 border-t border-line">
-          <Button variant="secondary" size="sm" type="button" onClick={closePaymentModal} disabled={isSubmitting}>
+          <Button variant="secondary" size="sm" type="button" onClick={onClose} disabled={isSubmitting}>
             Cancel
           </Button>
           <Button variant="primary" size="sm" type="submit" disabled={isSubmitting} isLoading={isSubmitting}>
@@ -148,5 +161,20 @@ export const RecordPaymentModal: React.FC = () => {
         </div>
       </form>
     </Modal>
+  );
+};
+
+export const RecordPaymentModal: React.FC = () => {
+  const { paymentModalInvoice, closePaymentModal, recordPayment } = useApp();
+
+  if (!paymentModalInvoice) return null;
+
+  return (
+    <RecordPaymentModalContent
+      key={getPaymentModalResetKey(paymentModalInvoice)}
+      invoice={paymentModalInvoice}
+      onClose={closePaymentModal}
+      onSubmit={recordPayment}
+    />
   );
 };

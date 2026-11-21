@@ -733,7 +733,36 @@ export const StorageService = {
     const clients = this.getClients();
     const filtered = clients.filter((c) => c.id !== id);
     if (filtered.length !== clients.length) {
-      this.lastWritePersisted = safeSet(KEYS.CLIENTS, filtered);
+      let persisted = safeSet(KEYS.CLIENTS, filtered);
+      const now = new Date().toISOString();
+
+      const rawQuotes = safeGet<Quotation[]>(KEYS.QUOTATIONS, []);
+      let quotesChanged = false;
+      const detachedQuotes = rawQuotes.map((q) => {
+        if (q.clientId === id) {
+          quotesChanged = true;
+          return { ...q, clientId: '', updatedAt: now };
+        }
+        return q;
+      });
+      if (quotesChanged) {
+        persisted = safeSet(KEYS.QUOTATIONS, detachedQuotes) && persisted;
+      }
+
+      const rawInvoices = safeGet<Invoice[]>(KEYS.INVOICES, []);
+      let invoicesChanged = false;
+      const detachedInvoices = rawInvoices.map((inv) => {
+        if (inv.clientId === id) {
+          invoicesChanged = true;
+          return { ...inv, clientId: '', updatedAt: now };
+        }
+        return inv;
+      });
+      if (invoicesChanged) {
+        persisted = safeSet(KEYS.INVOICES, detachedInvoices) && persisted;
+      }
+
+      this.lastWritePersisted = persisted;
       return true;
     }
     return false;
@@ -766,6 +795,14 @@ export const StorageService = {
     }
 
     const idx = rawQuotes.findIndex((q) => q.id === quote.id);
+    const existingRaw = idx !== -1 ? rawQuotes[idx] : undefined;
+    if (!existingRaw && quote.convertedInvoiceId) {
+      throw new Error('New quotations cannot specify convertedInvoiceId directly.');
+    }
+    if (existingRaw && (quote.convertedInvoiceId ?? undefined) !== (existingRaw.convertedInvoiceId ?? undefined)) {
+      throw new Error('convertedInvoiceId cannot be modified directly through quotation update.');
+    }
+
     const now = new Date().toISOString();
     const itemToSave: Quotation = {
       ...quote,
@@ -878,12 +915,15 @@ export const StorageService = {
     const idx = rawInvoices.findIndex((i) => i.id === invoice.id);
     const existingRaw = idx !== -1 ? rawInvoices[idx] : undefined;
 
-    // Enforce client existence when creating a new invoice or changing the assigned client
-    if (idx === -1 || existingRaw?.clientId !== invoice.clientId) {
-      const clientExists = clients.some((c) => c.id === invoice.clientId);
+    // Enforce client existence when a clientId is assigned; allow empty clientId when clientSnapshot is preserved
+    const normalizedClientId = (invoice.clientId || '').trim();
+    if (normalizedClientId && (idx === -1 || existingRaw?.clientId !== normalizedClientId)) {
+      const clientExists = clients.some((c) => c.id === normalizedClientId);
       if (!clientExists) {
         throw new Error('Cannot save invoice: the selected client record does not exist.');
       }
+    } else if (!normalizedClientId && !invoice.clientSnapshot?.name?.trim()) {
+      throw new Error('Cannot save invoice: client details are missing.');
     }
 
     // Resolve and validate quotation link (must store Quotation.id, never quotationNumber)
@@ -926,10 +966,22 @@ export const StorageService = {
 
     // Recalculate balances and auto status
     const { amountPaid, outstandingBalance } = calculateInvoiceBalances(invoice.grandTotal, invoice.payments || []);
-    const updatedStatus = determineUpdatedInvoiceStatus(invoice.status, invoice.grandTotal, amountPaid, invoice.dueDate);
+    const workflowBaseStatus =
+      amountPaid <= 0 && (invoice.status === 'paid' || invoice.status === 'partially_paid')
+        ? existingRaw?.status === 'draft'
+          ? 'draft'
+          : 'sent'
+        : invoice.status;
+    const updatedStatus = determineUpdatedInvoiceStatus(
+      workflowBaseStatus,
+      invoice.grandTotal,
+      amountPaid,
+      invoice.dueDate
+    );
 
     const itemToSave: Invoice = {
       ...invoice,
+      clientId: normalizedClientId,
       invoiceNumber: trimmedNumber,
       quotationId: resolvedQuotationId,
       amountPaid,

@@ -204,7 +204,7 @@ export const DocumentSheet: React.FC<DocumentSheetProps> = ({
           )}
 
           <div className="quote-total-line quote-grand-total-line">
-            <span>{isInvoice ? 'Total' : 'Total Amount Due'}</span>
+            <span>{isInvoice ? 'Total' : 'Quoted Total'}</span>
             <span className="quote-grand-total-value">
               {formatCurrency(document.grandTotal, document.currency, document.currencySymbol)}
             </span>

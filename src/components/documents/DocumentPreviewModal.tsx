@@ -15,6 +15,7 @@ import {
   FileCheck,
 } from 'lucide-react';
 import type { Quotation, Invoice, QuotationStatus, InvoiceStatus } from '../../types';
+import { getInvoiceStatusOptionsForUi } from '../../utils/documentWorkflow';
 
 export const DocumentPreviewModal: React.FC = () => {
   const {
@@ -159,33 +160,69 @@ export const DocumentPreviewModal: React.FC = () => {
           {/* Status quick changer */}
           <div className="flex items-center gap-1.5 bg-slate-800 rounded px-2 py-1 border border-slate-700">
             <span className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">Status:</span>
-            {isInvoice ? (
+            {isInvoice && invoice ? (
               <select
-                value={invoice?.status}
+                value={invoice.status}
                 disabled={isMutating}
-                onChange={(e) => void updateInvoiceStatus(invoice!.id, e.target.value as InvoiceStatus)}
+                onChange={(e) => void updateInvoiceStatus(invoice.id, e.target.value as InvoiceStatus)}
                 className="bg-transparent text-xs font-semibold text-white focus:outline-none cursor-pointer disabled:opacity-60"
               >
-                <option value="draft" className="bg-slate-900 text-white">Draft</option>
-                <option value="sent" className="bg-slate-900 text-white">Sent</option>
-                <option value="partially_paid" className="bg-slate-900 text-white">Partially Paid</option>
-                <option value="paid" className="bg-slate-900 text-white">Paid</option>
-                <option value="overdue" className="bg-slate-900 text-white">Overdue</option>
+                {getInvoiceStatusOptionsForUi(invoice).map((opt) => (
+                  <option
+                    key={opt.value}
+                    value={opt.value}
+                    disabled={opt.disabled}
+                    className="bg-slate-900 text-white disabled:text-slate-500"
+                  >
+                    {opt.label}
+                  </option>
+                ))}
               </select>
-            ) : (
+            ) : quote ? (
               <select
-                value={quote?.status}
-                disabled={isMutating}
-                onChange={(e) => void updateQuotationStatus(quote!.id, e.target.value as QuotationStatus)}
-                className="bg-transparent text-xs font-semibold text-white focus:outline-none cursor-pointer disabled:opacity-60"
+                value={quote.status}
+                disabled={isMutating || Boolean(quote.convertedInvoiceId)}
+                title={
+                  quote.convertedInvoiceId
+                    ? 'Converted quotations remain Accepted while linked to an invoice'
+                    : undefined
+                }
+                onChange={(e) => void updateQuotationStatus(quote.id, e.target.value as QuotationStatus)}
+                className="bg-transparent text-xs font-semibold text-white focus:outline-none cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                <option value="draft" className="bg-slate-900 text-white">Draft</option>
-                <option value="sent" className="bg-slate-900 text-white">Sent</option>
-                <option value="accepted" className="bg-slate-900 text-white">Accepted</option>
-                <option value="declined" className="bg-slate-900 text-white">Declined</option>
-                <option value="expired" className="bg-slate-900 text-white">Expired</option>
+                <option
+                  value="draft"
+                  disabled={Boolean(quote.convertedInvoiceId)}
+                  className="bg-slate-900 text-white disabled:text-slate-500"
+                >
+                  Draft
+                </option>
+                <option
+                  value="sent"
+                  disabled={Boolean(quote.convertedInvoiceId)}
+                  className="bg-slate-900 text-white disabled:text-slate-500"
+                >
+                  Sent
+                </option>
+                <option value="accepted" className="bg-slate-900 text-white">
+                  Accepted
+                </option>
+                <option
+                  value="declined"
+                  disabled={Boolean(quote.convertedInvoiceId)}
+                  className="bg-slate-900 text-white disabled:text-slate-500"
+                >
+                  Declined
+                </option>
+                <option
+                  value="expired"
+                  disabled={Boolean(quote.convertedInvoiceId)}
+                  className="bg-slate-900 text-white disabled:text-slate-500"
+                >
+                  Expired
+                </option>
               </select>
-            )}
+            ) : null}
           </div>
 
           {/* Quotation: Convert to Invoice */}

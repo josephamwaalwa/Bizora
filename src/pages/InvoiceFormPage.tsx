@@ -5,7 +5,17 @@ import { Input } from '../components/common/Input';
 import { Select } from '../components/common/Select';
 import { Textarea } from '../components/common/Textarea';
 import type { LineItem, Invoice, Client, InvoiceStatus } from '../types';
-import { calculateDocumentFinancials, calculateLineItemTotal, calculateInvoiceBalances } from '../utils/calculations';
+import {
+  calculateDocumentFinancials,
+  calculateLineItemTotal,
+  calculateInvoiceBalances,
+  determineUpdatedInvoiceStatus,
+} from '../utils/calculations';
+import {
+  getInvoiceStatusOptionsForUi,
+  hasRecordedInvoicePayment,
+  validateManualInvoiceStatusChange,
+} from '../utils/documentWorkflow';
 import { formatCurrency } from '../utils/formatters';
 import { generateId } from '../utils/idGenerator';
 import {
@@ -14,6 +24,7 @@ import {
   ArrowLeft,
   AlertCircle,
   Eye,
+  CreditCard,
 } from 'lucide-react';
 
 export const InvoiceFormPage: React.FC = () => {
@@ -29,6 +40,7 @@ export const InvoiceFormPage: React.FC = () => {
     getNextInvoiceNumber,
     isInvoiceNumberTaken,
     openDocumentPreview,
+    openPaymentModal,
     addToast,
   } = useApp();
 
@@ -151,9 +163,17 @@ export const InvoiceFormPage: React.FC = () => {
 
   const currentPayments = existingInvoice?.payments || [];
   const { amountPaid, outstandingBalance } = calculateInvoiceBalances(financials.grandTotal, currentPayments);
+  const hasPayments = hasRecordedInvoicePayment({ amountPaid, payments: currentPayments });
+  const paymentDerivedStatus = hasPayments
+    ? determineUpdatedInvoiceStatus(status, financials.grandTotal, amountPaid, dueDate)
+    : status;
+  const effectiveStatus = hasPayments ? paymentDerivedStatus : status;
 
   const matchedClient = clients.find((c) => c.id === selectedClientId);
   const currentClient = matchedClient || existingInvoice?.clientSnapshot;
+  const hasPreservedSnapshotFallback = Boolean(
+    isEditing && existingInvoice?.clientSnapshot?.name?.trim() && !matchedClient
+  );
 
   const handleAddItem = () => {
     setItems((prev) => [
@@ -280,12 +300,11 @@ export const InvoiceFormPage: React.FC = () => {
         }
       }
 
-      if (!clientToUse) {
-        reportValidationError(
-          isEditing && existingInvoice?.clientSnapshot
-            ? 'The original client record was deleted. Please select an existing client or quick-add a client before saving.'
-            : 'Please select or add a client before saving.'
-        );
+      const resolvedClientSnapshot = clientToUse || (hasPreservedSnapshotFallback ? existingInvoice?.clientSnapshot : undefined);
+      const resolvedClientId = clientToUse ? clientToUse.id : '';
+
+      if (!resolvedClientSnapshot?.name?.trim()) {
+        reportValidationError('Please select or add a client before saving.');
         return;
       }
 
@@ -343,12 +362,32 @@ export const InvoiceFormPage: React.FC = () => {
         resolvedQuotationId = matchedQuote.id;
       }
 
+      if (!hasPayments) {
+        const statusValidation = validateManualInvoiceStatusChange(
+          {
+            amountPaid,
+            payments: currentPayments,
+            grandTotal: financials.grandTotal,
+            status: existingInvoice?.status || status,
+            dueDate,
+          },
+          status
+        );
+        if (!statusValidation.valid) {
+          reportValidationError(
+            statusValidation.message ||
+              'Unpaid invoices with no recorded payments cannot be marked Paid or Partially Paid. Use Record Payment instead.'
+          );
+          return;
+        }
+      }
+
       const invoiceToSave: Invoice = {
         id: existingInvoice?.id || generateId('inv'),
         invoiceNumber: finalInvoiceNumber,
         quotationId: resolvedQuotationId,
-        clientId: clientToUse.id,
-        clientSnapshot: clientToUse,
+        clientId: resolvedClientId,
+        clientSnapshot: resolvedClientSnapshot,
         businessSnapshot: businessProfile,
         issueDate,
         dueDate,
@@ -360,12 +399,12 @@ export const InvoiceFormPage: React.FC = () => {
         discountValue: Number(discountValue) || 0,
         discountAmount: financials.discountAmount,
         taxName: isTaxEnabled ? taxName : 'None',
-        taxRate: isTaxEnabled ? Number(taxRate) : 0,
+        taxRate: isTaxEnabled ? Number(taxRate) || 0 : 0,
         taxAmount: financials.taxAmount,
         grandTotal: financials.grandTotal,
         amountPaid,
         outstandingBalance,
-        status,
+        status: effectiveStatus,
         notes: notes.trim() || undefined,
         terms: terms.trim() || undefined,
         payments: currentPayments,
@@ -413,7 +452,7 @@ export const InvoiceFormPage: React.FC = () => {
 
         <div className="flex items-center gap-2">
           <Button type="button" variant="secondary" size="sm" onClick={() => void handleSave(false)} disabled={isSubmitting}>
-            Save Draft
+            {isEditing ? 'Save Changes' : 'Save Draft'}
           </Button>
           <Button
             type="button"
@@ -573,8 +612,10 @@ export const InvoiceFormPage: React.FC = () => {
                     <p>{currentClient.email} • {currentClient.phone}</p>
                     {currentClient.address && <p>{currentClient.address}</p>}
                     {!matchedClient && (
-                      <p className="pt-1 text-[#8E3B32] dark:text-rose-400 font-medium">
-                        Original client record was removed. Select an existing client or quick-add a client to save.
+                      <p className="pt-1 text-[#8A5A12] dark:text-amber-400 font-medium">
+                        {hasPreservedSnapshotFallback
+                          ? 'Original client record was removed. Saving preserves this client snapshot, or you can assign another client above.'
+                          : 'Original client record was removed. Select an existing client or quick-add a client to save.'}
                       </p>
                     )}
                   </div>
@@ -737,18 +778,44 @@ export const InvoiceFormPage: React.FC = () => {
               })}
             </Select>
 
-            <Select
-              label="Invoice Status"
-              value={status}
-              onChange={(e) => setStatus(e.target.value as InvoiceStatus)}
-              options={[
-                { value: 'draft', label: 'Draft' },
-                { value: 'sent', label: 'Sent to Client' },
-                { value: 'partially_paid', label: 'Partially Paid' },
-                { value: 'paid', label: 'Paid in Full' },
-                { value: 'overdue', label: 'Overdue' },
-              ]}
-            />
+            <div className="space-y-2">
+              <Select
+                label="Invoice Status"
+                value={effectiveStatus}
+                onChange={(e) => setStatus(e.target.value as InvoiceStatus)}
+                options={getInvoiceStatusOptionsForUi(
+                  {
+                    amountPaid,
+                    payments: currentPayments,
+                    grandTotal: financials.grandTotal,
+                    status: effectiveStatus,
+                    dueDate,
+                  },
+                  {
+                    sent: 'Sent to Client',
+                    paid: 'Paid in Full',
+                  }
+                )}
+                helperText={
+                  hasPayments
+                    ? 'Status automatically reflects recorded payments.'
+                    : 'Use Record Payment to mark an invoice Partially Paid or Paid.'
+                }
+              />
+
+              {isEditing && existingInvoice && existingInvoice.status !== 'paid' && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  className="w-full"
+                  leftIcon={<CreditCard className="w-3.5 h-3.5 text-emerald-600" />}
+                  onClick={() => openPaymentModal(existingInvoice)}
+                >
+                  Record Payment ({formatCurrency(existingInvoice.outstandingBalance, existingInvoice.currency, existingInvoice.currencySymbol)} due)
+                </Button>
+              )}
+            </div>
 
             <div className="grid grid-cols-2 gap-2">
               <Input

@@ -35,6 +35,13 @@ import {
 } from '../services/runtimeStartup';
 import { generateId, formatDocNumber } from '../utils/idGenerator';
 import { calculateDocumentFinancials } from '../utils/calculations';
+import {
+  findLinkedInvoiceForQuotationRecord,
+  resolveClientReferenceWithSnapshotFallback,
+  validateConvertedQuotationEdit,
+  validateManualInvoiceStatusChange,
+  validateQuotationStatusChange,
+} from '../utils/documentWorkflow';
 import { useTheme } from '../hooks/useTheme';
 
 export interface AppBackupImportResult {
@@ -615,12 +622,48 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const saveQuotation = useCallback(
     async (quote: Quotation, options?: SaveDocumentOptions): Promise<Quotation | undefined> => {
       try {
-        return await runMutation(async (adapter) => {
+        let validationError: { title: string; message: string } | null = null;
+        const savedResult = await runMutation(async (adapter) => {
+          const existing = await adapter.getQuotationById(quote.id);
+          if (existing?.convertedInvoiceId) {
+            const currentInvoices = await adapter.getInvoices();
+            const linkedInv = findLinkedInvoiceForQuotationRecord(existing, currentInvoices);
+            const validation = validateConvertedQuotationEdit(existing, quote, linkedInv?.invoiceNumber);
+            if (!validation.valid) {
+              validationError = {
+                title: validation.title || 'Converted Quotation Locked',
+                message:
+                  validation.message ||
+                  'Converted quotations cannot have their financial contents or status modified.',
+              };
+              return undefined;
+            }
+          }
+
           const saved = await adapter.saveQuotation(quote);
           const persisted = didAdapterPersistLastWrite(adapter);
+
           if (options?.commitNumber && persisted) {
-            await adapter.commitUsedQuoteNumber(saved.quotationNumber);
+            try {
+              await adapter.commitUsedQuoteNumber(saved.quotationNumber);
+            } catch (counterErr) {
+              console.warn('Failed to advance quotation sequence counter:', counterErr);
+            }
           }
+
+          if (existing && saved.status !== existing.status) {
+            try {
+              await adapter.addActivity({
+                type: 'quote_status',
+                title: `Quotation ${saved.quotationNumber} Status Updated`,
+                description: `Status changed from ${existing.status} to ${saved.status}.`,
+                referenceId: saved.id,
+              });
+            } catch (activityErr) {
+              console.warn('Failed to log quotation status activity:', activityErr);
+            }
+          }
+
           await reloadWorkspaceFromAdapter(adapter);
 
           if (persisted) {
@@ -638,6 +681,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           }
           return saved;
         });
+
+        if (validationError) {
+          addToast({
+            type: 'error',
+            title: (validationError as { title: string; message: string }).title,
+            message: (validationError as { title: string; message: string }).message,
+          });
+        }
+        return savedResult;
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Failed to save quotation.';
         addToast({
@@ -712,11 +764,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (!original) return undefined;
 
       try {
-        return await runMutation(async (adapter) => {
-          const [currentProfile, nextNum] = await Promise.all([
+        let clientErrorMessage: string | null = null;
+        const result = await runMutation(async (adapter) => {
+          const [currentClients, currentProfile, nextNum] = await Promise.all([
+            adapter.getClients(),
             adapter.getBusinessProfile(),
             adapter.getNextAvailableQuoteNumber(),
           ]);
+
+          const clientRef = resolveClientReferenceWithSnapshotFallback(
+            original,
+            currentClients,
+            'duplicate'
+          );
+          if (!clientRef.ok) {
+            clientErrorMessage = clientRef.message || 'Cannot duplicate quotation: missing client details.';
+            return undefined;
+          }
+
           const newNumber = formatDocNumber(currentProfile.quotePrefix || 'QUO-', nextNum);
           const now = new Date().toISOString();
 
@@ -724,6 +789,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             ...original,
             id: generateId('quo'),
             quotationNumber: newNumber,
+            clientId: clientRef.clientId,
+            clientSnapshot: clientRef.clientSnapshot,
             businessSnapshot: currentProfile,
             status: 'draft',
             preConversionStatus: undefined,
@@ -743,7 +810,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           const saved = await adapter.saveQuotation(duplicated);
           const persisted = didAdapterPersistLastWrite(adapter);
           if (persisted) {
-            await adapter.commitUsedQuoteNumber(saved.quotationNumber);
+            try {
+              await adapter.commitUsedQuoteNumber(saved.quotationNumber);
+            } catch (counterErr) {
+              console.warn('Failed to advance quotation sequence counter:', counterErr);
+            }
           }
           await reloadWorkspaceFromAdapter(adapter);
 
@@ -762,6 +833,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           }
           return saved;
         });
+
+        if (clientErrorMessage) {
+          addToast({
+            type: 'error',
+            title: 'Cannot Duplicate Quotation',
+            message: clientErrorMessage,
+          });
+        }
+        return result;
       } catch (error) {
         const message =
           error instanceof Error ? error.message : 'Failed to duplicate quotation.';
@@ -781,6 +861,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const quote = quotations.find((q) => q.id === id);
       if (!quote) return false;
 
+      if (quote.status === status) return true;
+
+      const linkedInv = findLinkedInvoiceForQuotationRecord(quote, invoices);
+      const validation = validateQuotationStatusChange(quote, status, linkedInv?.invoiceNumber);
+      if (!validation.valid) {
+        addToast({
+          type: 'error',
+          title: validation.title || 'Status Update Blocked',
+          message: validation.message || 'This quotation status cannot be changed.',
+        });
+        return false;
+      }
+
       const updated: Quotation = {
         ...quote,
         status,
@@ -791,19 +884,33 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return await runMutation(async (adapter) => {
           const saved = await adapter.saveQuotation(updated);
           const persisted = didAdapterPersistLastWrite(adapter);
+
+          if (saved.status !== quote.status) {
+            try {
+              await adapter.addActivity({
+                type: 'quote_status',
+                title: `Quotation ${saved.quotationNumber} Status Updated`,
+                description: `Status changed from ${quote.status} to ${saved.status}.`,
+                referenceId: saved.id,
+              });
+            } catch (activityErr) {
+              console.warn('Failed to log quotation status activity:', activityErr);
+            }
+          }
+
           await reloadWorkspaceFromAdapter(adapter);
 
           if (persisted) {
             addToast({
               type: 'info',
               title: 'Status Updated',
-              message: `${quote.quotationNumber} status changed to ${status}.`,
+              message: `${saved.quotationNumber} status changed to ${saved.status}.`,
             });
           } else {
             addToast({
               type: 'warning',
               title: 'Updated Active Session',
-              message: `${quote.quotationNumber} status changed in memory, but browser storage could not persist it across reloads.`,
+              message: `${saved.quotationNumber} status changed in memory, but browser storage could not persist it across reloads.`,
             });
           }
 
@@ -823,7 +930,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return false;
       }
     },
-    [quotations, runMutation, reloadWorkspaceFromAdapter, addToast, previewDocument]
+    [quotations, invoices, runMutation, reloadWorkspaceFromAdapter, addToast, previewDocument]
   );
 
   const convertQuotationToInvoice = useCallback(
@@ -840,13 +947,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return undefined;
       }
 
-      const existingLinkedInvoice = invoices.find(
-        (inv) =>
-          inv.id === quote.convertedInvoiceId ||
-          inv.quotationId === quote.id ||
-          (inv.quotationId &&
-            inv.quotationId.trim().toLowerCase() === quote.quotationNumber.trim().toLowerCase())
-      );
+      const existingLinkedInvoice = findLinkedInvoiceForQuotationRecord(quote, invoices);
       if (existingLinkedInvoice) {
         addToast({
           type: 'info',
@@ -858,16 +959,40 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
 
       try {
-        return await runMutation(async (adapter) => {
-          const currentClients = await adapter.getClients();
-          const clientExists = currentClients.some((c) => c.id === quote.clientId);
-          if (!clientExists) {
-            addToast({
-              type: 'error',
-              title: 'Cannot Convert Quotation',
-              message:
-                'The client for this quotation no longer exists. Please recreate or assign a client first.',
-            });
+        let clientErrorMessage: string | null = null;
+        let alreadyLinkedResult: Invoice | undefined;
+
+        const createdResult = await runMutation(async (adapter) => {
+          const [liveQuote, currentInvoices, currentClients] = await Promise.all([
+            adapter.getQuotationById(quotationId),
+            adapter.getInvoices(),
+            adapter.getClients(),
+          ]);
+
+          const effectiveQuote = liveQuote || quote;
+          const liveLinkedInvoice = findLinkedInvoiceForQuotationRecord(
+            effectiveQuote,
+            currentInvoices
+          );
+          if (liveLinkedInvoice) {
+            alreadyLinkedResult = liveLinkedInvoice;
+            return liveLinkedInvoice;
+          }
+
+          if (effectiveQuote.status === 'declined') {
+            clientErrorMessage = `Quotation ${effectiveQuote.quotationNumber} is declined and cannot be converted to an invoice.`;
+            return undefined;
+          }
+
+          const clientRef = resolveClientReferenceWithSnapshotFallback(
+            effectiveQuote,
+            currentClients,
+            'convert'
+          );
+          if (!clientRef.ok) {
+            clientErrorMessage =
+              clientRef.message ||
+              'The client for this quotation no longer exists. Please assign a client first.';
             return undefined;
           }
 
@@ -886,77 +1011,73 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             .toISOString()
             .split('T')[0];
 
-          const copiedItems = quote.items.map((item) => ({
+          const copiedItems = effectiveQuote.items.map((item) => ({
             ...item,
             id: generateId('item'),
           }));
 
           const financials = calculateDocumentFinancials({
             items: copiedItems,
-            discountType: quote.discountType,
-            discountValue: quote.discountValue,
-            isTaxEnabled: quote.taxRate > 0,
-            taxRate: quote.taxRate,
-            taxName: quote.taxName,
+            discountType: effectiveQuote.discountType,
+            discountValue: effectiveQuote.discountValue,
+            isTaxEnabled: effectiveQuote.taxRate > 0,
+            taxRate: effectiveQuote.taxRate,
+            taxName: effectiveQuote.taxName,
           });
 
           const newInvoice: Invoice = {
             id: generateId('inv'),
             invoiceNumber: newInvoiceNumber,
-            quotationId: quote.id,
-            clientId: quote.clientId,
-            clientSnapshot: quote.clientSnapshot,
+            quotationId: effectiveQuote.id,
+            clientId: clientRef.clientId,
+            clientSnapshot: clientRef.clientSnapshot,
             businessSnapshot: currentProfile,
             issueDate,
             dueDate,
-            currency: quote.currency,
-            currencySymbol: quote.currencySymbol,
+            currency: effectiveQuote.currency,
+            currencySymbol: effectiveQuote.currencySymbol,
             items: copiedItems,
             subtotal: financials.subtotal,
-            discountType: quote.discountType,
-            discountValue: quote.discountValue,
+            discountType: effectiveQuote.discountType,
+            discountValue: effectiveQuote.discountValue,
             discountAmount: financials.discountAmount,
-            taxName: quote.taxName,
-            taxRate: quote.taxRate,
+            taxName: effectiveQuote.taxName,
+            taxRate: effectiveQuote.taxRate,
             taxAmount: financials.taxAmount,
             grandTotal: financials.grandTotal,
             amountPaid: 0,
             outstandingBalance: financials.grandTotal,
             status: 'sent',
-            notes: quote.notes,
+            notes: effectiveQuote.notes,
             terms: currentProfile.defaultTermsInvoice,
             payments: [],
             createdAt: now,
             updatedAt: now,
           };
 
+          // Both SQLite (in create_invoice Immediate tx) and BrowserStorage atomically link
+          // and mark the quotation as 'accepted' with convertedInvoiceId inside saveInvoice.
           const savedInvoice = await adapter.saveInvoice(newInvoice);
           const persisted = didAdapterPersistLastWrite(adapter);
 
-          // Link quotation <-> converted invoice across both adapters consistently
-          if (adapter.backend === 'sqlite') {
-            await adapter.saveQuotation({
-              ...quote,
-              status: 'accepted',
-              preConversionStatus:
-                quote.status === 'accepted'
-                  ? quote.preConversionStatus
-                  : quote.preConversionStatus ?? quote.status,
-              convertedInvoiceId: savedInvoice.id,
-              updatedAt: now,
-            });
-          }
-
           if (persisted) {
-            await adapter.commitUsedInvoiceNumber(savedInvoice.invoiceNumber);
+            try {
+              await adapter.commitUsedInvoiceNumber(savedInvoice.invoiceNumber);
+            } catch (counterErr) {
+              console.warn('Failed to advance invoice sequence counter:', counterErr);
+            }
           }
 
-          await adapter.addActivity({
-            type: 'quote_converted',
-            title: `Quotation ${quote.quotationNumber} Converted`,
-            description: `Created Invoice ${savedInvoice.invoiceNumber} for ${quote.clientSnapshot.name}`,
-            referenceId: savedInvoice.id,
-          });
+          try {
+            await adapter.addActivity({
+              type: 'quote_converted',
+              title: `Quotation ${effectiveQuote.quotationNumber} Converted`,
+              description: `Created Invoice ${savedInvoice.invoiceNumber} for ${clientRef.clientSnapshot.name}`,
+              referenceId: savedInvoice.id,
+            });
+          } catch (activityErr) {
+            console.warn('Failed to log quotation conversion activity:', activityErr);
+          }
 
           await reloadWorkspaceFromAdapter(adapter);
 
@@ -964,7 +1085,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             addToast({
               type: 'success',
               title: 'Converted to Invoice',
-              message: `${quote.quotationNumber} was successfully converted into ${savedInvoice.invoiceNumber}.`,
+              message: `${effectiveQuote.quotationNumber} was successfully converted into ${savedInvoice.invoiceNumber}.`,
             });
           } else {
             addToast({
@@ -977,6 +1098,25 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           setPreviewDocument({ type: 'invoice', data: savedInvoice });
           return savedInvoice;
         });
+
+        if (alreadyLinkedResult) {
+          addToast({
+            type: 'info',
+            title: 'Already Converted',
+            message: `${quote.quotationNumber} is already linked to Invoice ${alreadyLinkedResult.invoiceNumber}.`,
+          });
+          setPreviewDocument({ type: 'invoice', data: alreadyLinkedResult });
+          return alreadyLinkedResult;
+        }
+
+        if (clientErrorMessage) {
+          addToast({
+            type: 'error',
+            title: 'Cannot Convert Quotation',
+            message: clientErrorMessage,
+          });
+        }
+        return createdResult;
       } catch (error) {
         const message =
           error instanceof Error ? error.message : 'Failed to convert quotation to invoice.';
@@ -996,11 +1136,31 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     async (invoice: Invoice, options?: SaveDocumentOptions): Promise<Invoice | undefined> => {
       try {
         return await runMutation(async (adapter) => {
+          const existing = await adapter.getInvoiceById(invoice.id);
           const saved = await adapter.saveInvoice(invoice);
           const persisted = didAdapterPersistLastWrite(adapter);
+
           if (options?.commitNumber && persisted) {
-            await adapter.commitUsedInvoiceNumber(saved.invoiceNumber);
+            try {
+              await adapter.commitUsedInvoiceNumber(saved.invoiceNumber);
+            } catch (counterErr) {
+              console.warn('Failed to advance invoice sequence counter:', counterErr);
+            }
           }
+
+          if (existing && saved.status !== existing.status) {
+            try {
+              await adapter.addActivity({
+                type: 'invoice_status',
+                title: `Invoice ${saved.invoiceNumber} Status Updated`,
+                description: `Status changed from ${existing.status} to ${saved.status}.`,
+                referenceId: saved.id,
+              });
+            } catch (activityErr) {
+              console.warn('Failed to log invoice status activity:', activityErr);
+            }
+          }
+
           await reloadWorkspaceFromAdapter(adapter);
 
           if (persisted) {
@@ -1092,23 +1252,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       if (!original) return undefined;
 
       try {
-        return await runMutation(async (adapter) => {
-          const currentClients = await adapter.getClients();
-          const clientExists = currentClients.some((c) => c.id === original.clientId);
-          if (!clientExists) {
-            addToast({
-              type: 'error',
-              title: 'Cannot Duplicate Invoice',
-              message:
-                'The client for this invoice no longer exists. Please recreate or assign a client first.',
-            });
-            return undefined;
-          }
-
-          const [currentProfile, nextNum] = await Promise.all([
+        let clientErrorMessage: string | null = null;
+        const result = await runMutation(async (adapter) => {
+          const [currentClients, currentProfile, nextNum] = await Promise.all([
+            adapter.getClients(),
             adapter.getBusinessProfile(),
             adapter.getNextAvailableInvoiceNumber(),
           ]);
+
+          const clientRef = resolveClientReferenceWithSnapshotFallback(
+            original,
+            currentClients,
+            'duplicate'
+          );
+          if (!clientRef.ok) {
+            clientErrorMessage = clientRef.message || 'Cannot duplicate invoice: missing client details.';
+            return undefined;
+          }
+
           const newNumber = formatDocNumber(currentProfile.invoicePrefix || 'INV-', nextNum);
           const now = new Date().toISOString();
 
@@ -1116,6 +1277,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
             ...original,
             id: generateId('inv'),
             invoiceNumber: newNumber,
+            clientId: clientRef.clientId,
+            clientSnapshot: clientRef.clientSnapshot,
             businessSnapshot: currentProfile,
             status: 'draft',
             items: original.items.map((item) => ({
@@ -1137,7 +1300,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           const saved = await adapter.saveInvoice(duplicated);
           const persisted = didAdapterPersistLastWrite(adapter);
           if (persisted) {
-            await adapter.commitUsedInvoiceNumber(saved.invoiceNumber);
+            try {
+              await adapter.commitUsedInvoiceNumber(saved.invoiceNumber);
+            } catch (counterErr) {
+              console.warn('Failed to advance invoice sequence counter:', counterErr);
+            }
           }
           await reloadWorkspaceFromAdapter(adapter);
 
@@ -1156,6 +1323,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
           }
           return saved;
         });
+
+        if (clientErrorMessage) {
+          addToast({
+            type: 'error',
+            title: 'Cannot Duplicate Invoice',
+            message: clientErrorMessage,
+          });
+        }
+        return result;
       } catch (error) {
         const message =
           error instanceof Error ? error.message : 'Failed to duplicate invoice.';
@@ -1175,24 +1351,50 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       const invoice = invoices.find((i) => i.id === id);
       if (!invoice) return false;
 
+      if (invoice.status === status) return true;
+
+      const validation = validateManualInvoiceStatusChange(invoice, status);
+      if (!validation.valid) {
+        addToast({
+          type: 'error',
+          title: validation.title || 'Status Update Blocked',
+          message: validation.message || 'This invoice status cannot be changed manually.',
+        });
+        return false;
+      }
+
       const updated: Invoice = { ...invoice, status };
       try {
         return await runMutation(async (adapter) => {
           const saved = await adapter.saveInvoice(updated);
           const persisted = didAdapterPersistLastWrite(adapter);
+
+          if (saved.status !== invoice.status) {
+            try {
+              await adapter.addActivity({
+                type: 'invoice_status',
+                title: `Invoice ${saved.invoiceNumber} Status Updated`,
+                description: `Status changed from ${invoice.status} to ${saved.status}.`,
+                referenceId: saved.id,
+              });
+            } catch (activityErr) {
+              console.warn('Failed to log invoice status activity:', activityErr);
+            }
+          }
+
           await reloadWorkspaceFromAdapter(adapter);
 
           if (persisted) {
             addToast({
               type: 'info',
               title: 'Status Updated',
-              message: `${invoice.invoiceNumber} status changed to ${status}.`,
+              message: `${saved.invoiceNumber} status changed to ${saved.status}.`,
             });
           } else {
             addToast({
               type: 'warning',
               title: 'Updated Active Session',
-              message: `${invoice.invoiceNumber} status changed in memory, but browser storage could not persist it across reloads.`,
+              message: `${saved.invoiceNumber} status changed in memory, but browser storage could not persist it across reloads.`,
             });
           }
 

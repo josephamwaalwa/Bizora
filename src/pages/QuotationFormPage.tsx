@@ -6,6 +6,10 @@ import { Select } from '../components/common/Select';
 import { Textarea } from '../components/common/Textarea';
 import type { LineItem, Quotation, Client, QuotationStatus } from '../types';
 import { calculateDocumentFinancials, calculateLineItemTotal } from '../utils/calculations';
+import {
+  findLinkedInvoiceForQuotationRecord,
+  validateConvertedQuotationEdit,
+} from '../utils/documentWorkflow';
 import { formatCurrency } from '../utils/formatters';
 import { generateId } from '../utils/idGenerator';
 import {
@@ -14,6 +18,7 @@ import {
   ArrowLeft,
   AlertCircle,
   Eye,
+  Lock,
 } from 'lucide-react';
 
 export const QuotationFormPage: React.FC = () => {
@@ -21,6 +26,7 @@ export const QuotationFormPage: React.FC = () => {
     activeEntityId,
     setActiveView,
     quotations,
+    invoices,
     clients,
     businessProfile,
     saveQuotation,
@@ -33,6 +39,10 @@ export const QuotationFormPage: React.FC = () => {
 
   const isEditing = Boolean(activeEntityId);
   const existingQuote = isEditing ? quotations.find((q) => q.id === activeEntityId) : null;
+  const isConverted = Boolean(existingQuote?.convertedInvoiceId);
+  const linkedInvoice = existingQuote
+    ? findLinkedInvoiceForQuotationRecord(existingQuote, invoices)
+    : undefined;
 
   // Selected Client
   const [selectedClientId, setSelectedClientId] = useState<string>(() => {
@@ -141,6 +151,9 @@ export const QuotationFormPage: React.FC = () => {
 
   const matchedClient = clients.find((c) => c.id === selectedClientId);
   const currentClient = matchedClient || existingQuote?.clientSnapshot;
+  const hasPreservedSnapshotFallback = Boolean(
+    isEditing && existingQuote?.clientSnapshot?.name?.trim() && !matchedClient
+  );
 
   const handleAddItem = () => {
     setItems((prev) => [
@@ -253,12 +266,11 @@ export const QuotationFormPage: React.FC = () => {
         }
       }
 
-      if (!clientToUse) {
-        reportValidationError(
-          isEditing && existingQuote?.clientSnapshot
-            ? 'The original client record was deleted. Please select an existing client or quick-add a client before saving.'
-            : 'Please select or add a client before saving.'
-        );
+      const resolvedClientSnapshot = clientToUse || (hasPreservedSnapshotFallback ? existingQuote?.clientSnapshot : undefined);
+      const resolvedClientId = clientToUse ? clientToUse.id : '';
+
+      if (!resolvedClientSnapshot?.name?.trim()) {
+        reportValidationError('Please select or add a client before saving.');
         return;
       }
 
@@ -281,9 +293,9 @@ export const QuotationFormPage: React.FC = () => {
       const quoteToSave: Quotation = {
         id: existingQuote?.id || generateId('quo'),
         quotationNumber: finalQuoteNumber,
-        clientId: clientToUse.id,
-        clientSnapshot: clientToUse,
-        businessSnapshot: businessProfile,
+        clientId: resolvedClientId,
+        clientSnapshot: resolvedClientSnapshot,
+        businessSnapshot: existingQuote?.businessSnapshot || businessProfile,
         issueDate,
         expiryDate,
         currency,
@@ -305,6 +317,21 @@ export const QuotationFormPage: React.FC = () => {
         createdAt: existingQuote?.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
+
+      if (existingQuote?.convertedInvoiceId) {
+        const conversionValidation = validateConvertedQuotationEdit(
+          existingQuote,
+          quoteToSave,
+          linkedInvoice?.invoiceNumber
+        );
+        if (!conversionValidation.valid) {
+          reportValidationError(
+            conversionValidation.message ||
+              'Converted quotations cannot have their line items, pricing, client, or status modified.'
+          );
+          return;
+        }
+      }
 
       const saved = await saveQuotation(quoteToSave, { commitNumber: !isEditing });
       if (!saved) {
@@ -346,7 +373,7 @@ export const QuotationFormPage: React.FC = () => {
 
         <div className="flex items-center gap-2">
           <Button type="button" variant="secondary" size="sm" onClick={() => void handleSave(false)} disabled={isSubmitting}>
-            Save Draft
+            {isEditing ? 'Save Changes' : 'Save Draft'}
           </Button>
           <Button
             type="button"
@@ -361,6 +388,33 @@ export const QuotationFormPage: React.FC = () => {
           </Button>
         </div>
       </div>
+
+      {isConverted && existingQuote && (
+        <div
+          role="status"
+          className="p-3.5 rounded bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3 font-medium"
+        >
+          <div className="flex items-start sm:items-center gap-2">
+            <Lock className="w-4 h-4 shrink-0 mt-0.5 sm:mt-0" />
+            <span>
+              Converted to{' '}
+              <strong>{linkedInvoice ? `Invoice ${linkedInvoice.invoiceNumber}` : 'an invoice'}</strong>.
+              Line items, pricing, client assignment, and status are locked to protect conversion integrity.
+              Notes, terms, and expiry date can still be updated.
+            </span>
+          </div>
+          {linkedInvoice && (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => openDocumentPreview('invoice', linkedInvoice)}
+            >
+              View Linked Invoice
+            </Button>
+          )}
+        </div>
+      )}
 
       {errorMsg && (
         <div className="p-3 rounded bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-300 text-xs flex items-center gap-2 font-medium">
@@ -416,13 +470,15 @@ export const QuotationFormPage: React.FC = () => {
               <span className="text-xs font-bold uppercase tracking-wider text-ink-muted font-sans">
                 Client (Bill To)
               </span>
-              <button
-                type="button"
-                onClick={() => setIsAddingNewClient(!isAddingNewClient)}
-                className="text-xs font-semibold text-ink-secondary hover:text-ink"
-              >
-                {isAddingNewClient ? 'Select existing client' : '+ Quick add client'}
-              </button>
+              {!isConverted && (
+                <button
+                  type="button"
+                  onClick={() => setIsAddingNewClient(!isAddingNewClient)}
+                  className="text-xs font-semibold text-ink-secondary hover:text-ink"
+                >
+                  {isAddingNewClient ? 'Select existing client' : '+ Quick add client'}
+                </button>
+              )}
             </div>
 
             {isAddingNewClient ? (
@@ -490,6 +546,7 @@ export const QuotationFormPage: React.FC = () => {
                   <Select
                     label="Select Client"
                     value={matchedClient ? selectedClientId : ''}
+                    disabled={isConverted}
                     onChange={(e) => setSelectedClientId(e.target.value)}
                     options={[
                       ...(!matchedClient
@@ -510,8 +567,10 @@ export const QuotationFormPage: React.FC = () => {
                     <p>{currentClient.email} • {currentClient.phone}</p>
                     {currentClient.address && <p>{currentClient.address}</p>}
                     {!matchedClient && (
-                      <p className="pt-1 text-[#8E3B32] dark:text-rose-400 font-medium">
-                        Original client record was removed. Select an existing client or quick-add a client to save.
+                      <p className="pt-1 text-[#8A5A12] dark:text-amber-400 font-medium">
+                        {hasPreservedSnapshotFallback
+                          ? 'Original client record was removed. Saving preserves this client snapshot.'
+                          : 'Original client record was removed. Select an existing client or quick-add a client to save.'}
                       </p>
                     )}
                   </div>
@@ -526,15 +585,17 @@ export const QuotationFormPage: React.FC = () => {
               <span className="text-xs font-bold uppercase tracking-wider text-ink-muted font-sans">
                 Itemised Services & Products
               </span>
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={handleAddItem}
-                leftIcon={<Plus className="w-3 h-3" />}
-              >
-                Add Item
-              </Button>
+              {!isConverted && (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={handleAddItem}
+                  leftIcon={<Plus className="w-3 h-3" />}
+                >
+                  Add Item
+                </Button>
+              )}
             </div>
 
             <div className="space-y-3">
@@ -551,12 +612,13 @@ export const QuotationFormPage: React.FC = () => {
                       <Input
                         label="Description of Service / Product"
                         value={item.description}
+                        disabled={isConverted}
                         onChange={(e) => handleItemChange(item.id, 'description', e.target.value)}
                         placeholder="e.g. Website Redesign & Technical SEO Audit"
                         required
                       />
                     </div>
-                    {items.length > 1 && (
+                    {items.length > 1 && !isConverted && (
                       <button
                         type="button"
                         onClick={() => handleRemoveItem(item.id)}
@@ -575,6 +637,7 @@ export const QuotationFormPage: React.FC = () => {
                       min="1"
                       step="1"
                       value={item.quantity}
+                      disabled={isConverted}
                       onChange={(e) => handleItemChange(item.id, 'quantity', parseFloat(e.target.value) || 0)}
                       required
                     />
@@ -584,6 +647,7 @@ export const QuotationFormPage: React.FC = () => {
                       min="0"
                       step="0.01"
                       value={item.unitPrice}
+                      disabled={isConverted}
                       onChange={(e) => handleItemChange(item.id, 'unitPrice', parseFloat(e.target.value) || 0)}
                       required
                     />
@@ -634,29 +698,34 @@ export const QuotationFormPage: React.FC = () => {
             <Input
               label="Quotation Number"
               value={quotationNumber}
+              disabled={isConverted}
               onChange={(e) => {
                 hasManuallyEditedNumberRef.current = true;
                 setQuotationNumber(e.target.value);
               }}
               placeholder={existingQuote ? existingQuote.quotationNumber : 'Auto-assigned if blank'}
               helperText={
-                isEditing
-                  ? 'Leave blank to keep the current quotation number.'
-                  : 'Leave blank to auto-assign the next sequential number.'
+                isConverted
+                  ? 'Locked after conversion to invoice.'
+                  : isEditing
+                    ? 'Leave blank to keep the current quotation number.'
+                    : 'Leave blank to auto-assign the next sequential number.'
               }
             />
 
             <Select
               label="Quotation Status"
               value={status}
+              disabled={isConverted}
               onChange={(e) => setStatus(e.target.value as QuotationStatus)}
               options={[
-                { value: 'draft', label: 'Draft' },
-                { value: 'sent', label: 'Sent to Client' },
+                { value: 'draft', label: 'Draft', disabled: isConverted },
+                { value: 'sent', label: 'Sent to Client', disabled: isConverted },
                 { value: 'accepted', label: 'Accepted' },
-                { value: 'declined', label: 'Declined' },
-                { value: 'expired', label: 'Expired' },
+                { value: 'declined', label: 'Declined', disabled: isConverted },
+                { value: 'expired', label: 'Expired', disabled: isConverted },
               ]}
+              helperText={isConverted ? 'Locked to Accepted while linked to an invoice.' : undefined}
             />
 
             <div className="grid grid-cols-2 gap-2">
@@ -664,6 +733,7 @@ export const QuotationFormPage: React.FC = () => {
                 label="Issue Date"
                 type="date"
                 value={issueDate}
+                disabled={isConverted}
                 onChange={(e) => setIssueDate(e.target.value)}
                 required
               />
@@ -680,12 +750,14 @@ export const QuotationFormPage: React.FC = () => {
               <Input
                 label="Currency"
                 value={currency}
+                disabled={isConverted}
                 onChange={(e) => setCurrency(e.target.value.toUpperCase())}
                 placeholder="NAD"
               />
               <Input
                 label="Symbol"
                 value={currencySymbol}
+                disabled={isConverted}
                 onChange={(e) => setCurrencySymbol(e.target.value)}
                 placeholder="N$"
               />
@@ -706,6 +778,7 @@ export const QuotationFormPage: React.FC = () => {
               <div className="grid grid-cols-2 gap-2">
                 <Select
                   value={discountType}
+                  disabled={isConverted}
                   onChange={(e) => setDiscountType(e.target.value as any)}
                   options={[
                     { value: 'percentage', label: 'Percent (%)' },
@@ -716,6 +789,7 @@ export const QuotationFormPage: React.FC = () => {
                   type="number"
                   min="0"
                   value={discountValue}
+                  disabled={isConverted}
                   onChange={(e) => setDiscountValue(parseFloat(e.target.value) || 0)}
                   placeholder="0"
                 />
@@ -728,10 +802,11 @@ export const QuotationFormPage: React.FC = () => {
                 <span className="text-xs font-bold uppercase tracking-wider text-ink-muted font-sans">
                   Tax Calculation
                 </span>
-                <label className="flex items-center gap-1.5 cursor-pointer text-xs text-ink-secondary">
+                <label className={`flex items-center gap-1.5 text-xs text-ink-secondary ${isConverted ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}`}>
                   <input
                     type="checkbox"
                     checked={isTaxEnabled}
+                    disabled={isConverted}
                     onChange={(e) => setIsTaxEnabled(e.target.checked)}
                     className="rounded border-line-strong text-indigo-600 focus:ring-indigo-500"
                   />
@@ -744,6 +819,7 @@ export const QuotationFormPage: React.FC = () => {
                   <Input
                     label="Tax Name"
                     value={taxName}
+                    disabled={isConverted}
                     onChange={(e) => setTaxName(e.target.value)}
                     placeholder="VAT"
                   />
@@ -753,6 +829,7 @@ export const QuotationFormPage: React.FC = () => {
                     min="0"
                     step="0.1"
                     value={taxRate}
+                    disabled={isConverted}
                     onChange={(e) => setTaxRate(parseFloat(e.target.value) || 0)}
                     placeholder="15"
                   />

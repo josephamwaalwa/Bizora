@@ -72,41 +72,66 @@ export function calculateInvoiceBalances(grandTotal: number, payments: PaymentRe
   };
 }
 
+export function getLocalTodayDateString(now: Date = new Date()): string {
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+export function normalizeDateOnly(value?: string | null): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  const match = /^(\d{4}-\d{2}-\d{2})/.exec(trimmed);
+  if (match) return match[1];
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return getLocalTodayDateString(parsed);
+}
+
+export function isDateBeforeLocalToday(dateString?: string | null, todayString?: string): boolean {
+  const normalized = normalizeDateOnly(dateString);
+  if (!normalized) return false;
+  const today = todayString || getLocalTodayDateString();
+  return normalized < today;
+}
+
 export function determineUpdatedInvoiceStatus(
   currentStatus: InvoiceStatus,
   grandTotal: number,
   amountPaid: number,
-  dueDateString?: string
+  dueDateString?: string,
+  todayString?: string
 ): InvoiceStatus {
-  if (currentStatus === 'draft' && amountPaid <= 0) {
+  const safeTotal = Math.max(0, Number(grandTotal) || 0);
+  const safePaid = Math.max(0, Number(amountPaid) || 0);
+
+  if (currentStatus === 'draft' && safePaid <= 0) {
     return 'draft';
   }
 
-  if (grandTotal > 0 && amountPaid >= grandTotal - 0.001) {
+  if ((safeTotal > 0 && safePaid >= safeTotal - 0.001) || (safeTotal === 0 && safePaid > 0)) {
     return 'paid';
   }
 
-  if (amountPaid > 0 && amountPaid < grandTotal) {
+  if (safePaid > 0 && safePaid < safeTotal) {
     return 'partially_paid';
   }
 
-  // Check if overdue
-  if (dueDateString) {
-    const dueDate = new Date(dueDateString);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    if (!isNaN(dueDate.getTime()) && dueDate < today && amountPaid < grandTotal) {
-      return 'overdue';
-    }
+  const normalizedDue = normalizeDateOnly(dueDateString);
+  const today = todayString || getLocalTodayDateString();
+
+  // No recorded payments (safePaid <= 0): never allow 'paid' or 'partially_paid'
+  if (normalizedDue && normalizedDue < today && (safePaid < safeTotal || safeTotal === 0)) {
+    return 'overdue';
   }
 
-  if (currentStatus === 'overdue' && dueDateString) {
-    const dueDate = new Date(dueDateString);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    if (dueDate >= today) {
-      return 'sent';
-    }
+  if (currentStatus === 'overdue' && normalizedDue && normalizedDue >= today) {
+    return 'sent';
+  }
+
+  if (currentStatus === 'paid' || currentStatus === 'partially_paid') {
+    return 'sent';
   }
 
   return currentStatus || 'sent';

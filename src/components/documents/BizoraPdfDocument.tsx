@@ -620,7 +620,7 @@ export const BizoraPdfDocument: React.FC<BizoraPdfDocumentProps> = ({
             )}
 
             <View style={styles.grandTotalLine}>
-              <Text>{isInvoice ? 'Total' : 'Total Amount Due'}</Text>
+              <Text>{isInvoice ? 'Total' : 'Quoted Total'}</Text>
               <Text style={styles.grandTotalValue}>
                 {formatCurrency(document.grandTotal, document.currency, document.currencySymbol)}
               </Text>
