@@ -197,18 +197,16 @@ pub fn set_item_with_backend<B: SecretBackend>(
         backend
             .set_secret(&chunk_entry_key(&key, idx), chunk)
             .map_err(|err| match err {
-                SecretBackendError::Unavailable(msg) | SecretBackendError::NotFound => {
-                    let msg = if matches!(err, SecretBackendError::NotFound) {
-                        "OS credential store entry could not be created".to_string()
-                    } else {
-                        msg
-                    };
-                    CommandError {
-                        code: "SECURE_STORAGE_UNAVAILABLE".to_string(),
-                        message: msg,
-                        field: None,
-                    }
-                }
+                SecretBackendError::Unavailable(msg) => CommandError {
+                    code: "SECURE_STORAGE_UNAVAILABLE".to_string(),
+                    message: msg,
+                    field: None,
+                },
+                SecretBackendError::NotFound => CommandError {
+                    code: "SECURE_STORAGE_UNAVAILABLE".to_string(),
+                    message: "OS credential store entry could not be created".to_string(),
+                    field: None,
+                },
             })?;
     }
 
