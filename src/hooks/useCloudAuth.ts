@@ -4,12 +4,24 @@ import {
   type CloudAuthResult,
   type CloudAuthSession,
   type CloudAuthState,
+  type CloudSignUpInput,
+  type CloudSignUpOutcome,
 } from '../services/cloud';
 
 export interface UseCloudAuthReturn {
   authState: CloudAuthState;
   isRestoringSession: boolean;
   signInWithGoogle: () => Promise<CloudAuthResult<{ authorizationUrl: string }>>;
+  signInWithEmailPassword: (
+    email: string,
+    password: string
+  ) => Promise<CloudAuthResult<CloudAuthSession>>;
+  signUpWithEmailPassword: (
+    input: CloudSignUpInput
+  ) => Promise<CloudAuthResult<CloudSignUpOutcome>>;
+  requestPasswordReset: (email: string) => Promise<CloudAuthResult<{ email: string }>>;
+  updatePassword: (newPassword: string) => Promise<CloudAuthResult<CloudAuthSession>>;
+  cancelPasswordRecovery: () => Promise<void>;
   signOut: () => Promise<CloudAuthResult>;
   refreshSession: () => Promise<CloudAuthResult<CloudAuthSession>>;
   cancelPendingSignIn: () => Promise<void>;
@@ -50,6 +62,27 @@ export function useCloudAuth(): UseCloudAuthReturn {
   }, []);
 
   const signInWithGoogle = useCallback(() => cloudAuthService.signInWithGoogle(), []);
+  const signInWithEmailPassword = useCallback(
+    (email: string, password: string) =>
+      cloudAuthService.signInWithEmailPassword(email, password),
+    []
+  );
+  const signUpWithEmailPassword = useCallback(
+    (input: CloudSignUpInput) => cloudAuthService.signUpWithEmailPassword(input),
+    []
+  );
+  const requestPasswordReset = useCallback(
+    (email: string) => cloudAuthService.requestPasswordReset(email),
+    []
+  );
+  const updatePassword = useCallback(
+    (newPassword: string) => cloudAuthService.updatePassword(newPassword),
+    []
+  );
+  const cancelPasswordRecovery = useCallback(
+    () => cloudAuthService.cancelPasswordRecovery(),
+    []
+  );
   const signOut = useCallback(() => cloudAuthService.signOut(), []);
   const refreshSession = useCallback(() => cloudAuthService.refreshSession(), []);
   const cancelPendingSignIn = useCallback(
@@ -62,6 +95,11 @@ export function useCloudAuth(): UseCloudAuthReturn {
     authState,
     isRestoringSession,
     signInWithGoogle,
+    signInWithEmailPassword,
+    signUpWithEmailPassword,
+    requestPasswordReset,
+    updatePassword,
+    cancelPasswordRecovery,
     signOut,
     refreshSession,
     cancelPendingSignIn,

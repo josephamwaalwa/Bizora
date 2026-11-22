@@ -20,13 +20,16 @@ export {
 } from './secureStorage';
 
 export {
+  BIZORA_AUTH_FLOW_PARAM,
   BIZORA_OAUTH_REDIRECT_SCHEME,
   BIZORA_OAUTH_REDIRECT_URI,
   BIZORA_OAUTH_STATE_PARAM,
+  BIZORA_PASSWORD_RECOVERY_REDIRECT_URI,
   BIZORA_PKCE_FLOW_ID_PARAM,
   OAUTH_STATE_TTL_MS,
   PENDING_OAUTH_STORAGE_KEY,
   buildOAuthRedirectUri,
+  buildPasswordRecoveryRedirectUri,
   generateOAuthStateNonce,
   isValidOAuthBrowserUrl,
   parseOAuthCallbackUrl,
@@ -50,8 +53,11 @@ export {
 } from './supabaseClient';
 
 export {
+  MIN_PASSWORD_LENGTH,
   cloudAuthService,
   createCloudAuthService,
+  validateEmailAddress,
+  validatePasswordStrength,
   type CloudAuthErrorCode,
   type CloudAuthNotice,
   type CloudAuthResult,
@@ -60,4 +66,6 @@ export {
   type CloudAuthSession,
   type CloudAuthState,
   type CloudAuthStatus,
+  type CloudSignUpInput,
+  type CloudSignUpOutcome,
 } from './authService';

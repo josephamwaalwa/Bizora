@@ -14,6 +14,7 @@ export type SupabaseEnvVarName =
 export interface SupabaseEnvInput {
   VITE_SUPABASE_URL?: unknown;
   VITE_SUPABASE_PUBLISHABLE_KEY?: unknown;
+  VITE_SUPABASE_ANON_KEY?: unknown;
 }
 
 export interface SupabaseConfigValidationResult {
@@ -53,18 +54,34 @@ const PLACEHOLDER_KEY_PREFIXES = [
 const LOCAL_HTTP_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
 function readDefaultViteEnv(): SupabaseEnvInput {
+  let url: unknown;
+  let publishableKey: unknown;
+  let anonKey: unknown;
+
+  // Use direct static property access so Vite/Rollup reliably inlines VITE_* vars in desktop builds.
   try {
-    const metaEnv = (import.meta as unknown as { env?: Record<string, unknown> }).env;
-    if (metaEnv && typeof metaEnv === 'object') {
-      return {
-        VITE_SUPABASE_URL: metaEnv.VITE_SUPABASE_URL,
-        VITE_SUPABASE_PUBLISHABLE_KEY: metaEnv.VITE_SUPABASE_PUBLISHABLE_KEY,
-      };
-    }
+    url = import.meta.env.VITE_SUPABASE_URL;
   } catch {
-    // Non-Vite or restricted runtime without import.meta.env
+    url = undefined;
   }
-  return {};
+
+  try {
+    publishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+  } catch {
+    publishableKey = undefined;
+  }
+
+  try {
+    anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+  } catch {
+    anonKey = undefined;
+  }
+
+  return {
+    VITE_SUPABASE_URL: url,
+    VITE_SUPABASE_PUBLISHABLE_KEY: publishableKey,
+    VITE_SUPABASE_ANON_KEY: anonKey,
+  };
 }
 
 function normalizeEnvValue(
@@ -182,7 +199,14 @@ function validateUrlValue(rawUrl: string): { ok: true; url: string } | { ok: fal
     };
   }
 
-  const normalizedPath = parsed.pathname === '/' ? '' : parsed.pathname.replace(/\/+$/, '');
+  const rawNormalizedPath = parsed.pathname === '/' ? '' : parsed.pathname.replace(/\/+$/, '');
+  const isHostedSupabase =
+    hostname.endsWith('.supabase.co') || hostname.endsWith('.supabase.in');
+  const normalizedPath =
+    isHostedSupabase && /^\/(?:rest|auth)\/v1(?:\/.*)?$/i.test(rawNormalizedPath)
+      ? ''
+      : rawNormalizedPath;
+
   return {
     ok: true,
     url: `${parsed.origin}${normalizedPath}`,
@@ -239,7 +263,14 @@ export function validateSupabaseConfig(
   const issues: string[] = [];
 
   const urlEntry = normalizeEnvValue(env.VITE_SUPABASE_URL);
-  const keyEntry = normalizeEnvValue(env.VITE_SUPABASE_PUBLISHABLE_KEY);
+  const rawPublishableEntry = normalizeEnvValue(env.VITE_SUPABASE_PUBLISHABLE_KEY);
+  const rawAnonFallback = normalizeEnvValue(env.VITE_SUPABASE_ANON_KEY);
+  const keyEntry =
+    rawPublishableEntry.kind !== 'missing'
+      ? rawPublishableEntry
+      : rawAnonFallback.kind !== 'missing'
+        ? rawAnonFallback
+        : rawPublishableEntry;
 
   if (urlEntry.kind === 'missing') {
     missingVars.push('VITE_SUPABASE_URL');

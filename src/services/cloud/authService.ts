@@ -5,6 +5,7 @@ import { isDesktopTauriRuntime } from '../persistence';
 import type { CloudAvailabilityState } from './config';
 import {
   buildOAuthRedirectUri,
+  buildPasswordRecoveryRedirectUri,
   generateOAuthStateNonce,
   isValidOAuthBrowserUrl,
   OAUTH_STATE_TTL_MS,
@@ -17,11 +18,14 @@ import {
   type SupabaseClientManager,
 } from './supabaseClient';
 
+export const MIN_PASSWORD_LENGTH = 8;
+
 export type CloudAuthStatus =
   | 'unconfigured'
   | 'unauthenticated'
   | 'authenticating'
   | 'authenticated'
+  | 'recovery'
   | 'unavailable';
 
 export type CloudAuthErrorCode =
@@ -59,9 +63,23 @@ export interface CloudAuthState {
   session: CloudAuthSession | null;
   isAuthenticated: boolean;
   isAuthenticating: boolean;
+  isPasswordRecovery: boolean;
   availability: CloudAvailabilityState;
   lastNotice: CloudAuthNotice | null;
   error: string | null;
+}
+
+export interface CloudSignUpInput {
+  fullName: string;
+  email: string;
+  password: string;
+}
+
+export interface CloudSignUpOutcome {
+  status: 'authenticated' | 'confirmation_required';
+  email: string;
+  session: CloudAuthSession | null;
+  message: string;
 }
 
 export interface CloudAuthResult<T = void> {
@@ -89,6 +107,12 @@ export interface CloudAuthService {
     email: string,
     password: string
   ) => Promise<CloudAuthResult<CloudAuthSession>>;
+  signUpWithEmailPassword: (
+    input: CloudSignUpInput
+  ) => Promise<CloudAuthResult<CloudSignUpOutcome>>;
+  requestPasswordReset: (email: string) => Promise<CloudAuthResult<{ email: string }>>;
+  updatePassword: (newPassword: string) => Promise<CloudAuthResult<CloudAuthSession>>;
+  cancelPasswordRecovery: () => Promise<void>;
   handleOAuthCallbackUrl: (rawUrl: string) => Promise<CloudAuthResult<CloudAuthSession>>;
   refreshSession: () => Promise<CloudAuthResult<CloudAuthSession>>;
   cancelPendingSignIn: () => Promise<void>;
@@ -96,6 +120,27 @@ export interface CloudAuthService {
   signOut: () => Promise<CloudAuthResult>;
   onAuthStateChange: (listener: (state: CloudAuthState) => void) => () => void;
   dispose: () => void;
+}
+
+export function validateEmailAddress(email: string): string | null {
+  const trimmed = typeof email === 'string' ? email.trim() : '';
+  if (!trimmed) {
+    return 'Email address is required.';
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+    return 'Enter a valid email address.';
+  }
+  return null;
+}
+
+export function validatePasswordStrength(password: string): string | null {
+  if (typeof password !== 'string' || !password) {
+    return 'Password is required.';
+  }
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    return `Password must be at least ${MIN_PASSWORD_LENGTH} characters long.`;
+  }
+  return null;
 }
 
 function readOptionalMetadataString(
@@ -264,6 +309,7 @@ export function createCloudAuthService(
   const inFlightUrls = new Set<string>();
 
   let isAuthenticating = false;
+  let isPasswordRecovery = false;
   let lastNotice: CloudAuthNotice | null = null;
   let lastError: string | null = null;
   let cachedSession: CloudAuthSession | null = null;
@@ -283,6 +329,7 @@ export function createCloudAuthService(
         session: null,
         isAuthenticated: false,
         isAuthenticating: false,
+        isPasswordRecovery: false,
         availability,
         lastNotice,
         error: lastError,
@@ -295,9 +342,23 @@ export function createCloudAuthService(
         session: null,
         isAuthenticated: false,
         isAuthenticating: false,
+        isPasswordRecovery: false,
         availability,
         lastNotice,
         error: lastError ?? availability.reason,
+      };
+    }
+
+    if (isPasswordRecovery) {
+      return {
+        status: 'recovery',
+        session: cachedSession,
+        isAuthenticated: false,
+        isAuthenticating: false,
+        isPasswordRecovery: true,
+        availability,
+        lastNotice,
+        error: lastError,
       };
     }
 
@@ -307,6 +368,7 @@ export function createCloudAuthService(
         session: cachedSession,
         isAuthenticated: cachedSession !== null,
         isAuthenticating: true,
+        isPasswordRecovery: false,
         availability,
         lastNotice,
         error: lastError,
@@ -319,6 +381,7 @@ export function createCloudAuthService(
         session: cachedSession,
         isAuthenticated: true,
         isAuthenticating: false,
+        isPasswordRecovery: false,
         availability,
         lastNotice,
         error: lastError,
@@ -330,6 +393,7 @@ export function createCloudAuthService(
       session: null,
       isAuthenticated: false,
       isAuthenticating: false,
+      isPasswordRecovery: false,
       availability,
       lastNotice,
       error: lastError,
@@ -591,13 +655,19 @@ export function createCloudAuthService(
         };
       }
 
+      const isRecoveryFlow = validation.kind === 'valid_recovery_code';
+
       // Consume pending OAuth state immediately so the code/nonce cannot be replayed
-      await clearPendingFlow();
+      if (!isRecoveryFlow) {
+        await clearPendingFlow();
+      }
 
       const availability = clientManager.getAvailability();
       if (availability.status === 'offline') {
         isAuthenticating = false;
-        lastError = 'Cannot complete Google sign-in while offline.';
+        lastError = isRecoveryFlow
+          ? 'Cannot verify password reset link while offline.'
+          : 'Cannot complete Google sign-in while offline.';
         lastNotice = { kind: 'error', message: lastError };
         emitState();
         return {
@@ -629,7 +699,9 @@ export function createCloudAuthService(
         isAuthenticating = false;
         lastError = sanitizeAuthMessage(
           error,
-          'Could not complete Google sign-in. Please try again.'
+          isRecoveryFlow
+            ? 'Password reset link is invalid or expired. Please request a new reset email.'
+            : 'Could not complete Google sign-in. Please try again.'
         );
         lastNotice = { kind: 'error', message: lastError };
         emitState();
@@ -643,7 +715,9 @@ export function createCloudAuthService(
       const mapped = mapSupabaseSession(data.session, nowMs(), data.user);
       if (!mapped) {
         isAuthenticating = false;
-        lastError = 'Google sign-in did not return a valid session.';
+        lastError = isRecoveryFlow
+          ? 'Password reset link did not yield an active recovery session.'
+          : 'Google sign-in did not return a valid session.';
         lastNotice = { kind: 'error', message: lastError };
         emitState();
         return {
@@ -653,7 +727,13 @@ export function createCloudAuthService(
         };
       }
 
+      const redirectType =
+        data && typeof data === 'object' && 'redirectType' in data
+          ? (data as { redirectType?: unknown }).redirectType
+          : null;
+
       cachedSession = mapped;
+      isPasswordRecovery = isRecoveryFlow || redirectType === 'recovery';
       isAuthenticating = false;
       lastError = null;
       lastNotice = null;
@@ -796,11 +876,19 @@ export function createCloudAuthService(
     password: string
   ): Promise<CloudAuthResult<CloudAuthSession>> => {
     const trimmedEmail = typeof email === 'string' ? email.trim() : '';
-    if (!trimmedEmail || !password) {
+    const emailError = validateEmailAddress(trimmedEmail);
+    if (emailError) {
       return {
         ok: false,
         code: 'validation_error',
-        error: 'Email and password are required to sign in.',
+        error: emailError,
+      };
+    }
+    if (!password) {
+      return {
+        ok: false,
+        code: 'validation_error',
+        error: 'Password is required to sign in.',
       };
     }
 
@@ -839,7 +927,7 @@ export function createCloudAuthService(
         return {
           ok: false,
           code: 'auth_failed',
-          error: sanitizeAuthMessage(error, 'Cloud sign-in failed.'),
+          error: sanitizeAuthMessage(error, 'Sign-in failed. Verify your email and password.'),
         };
       }
 
@@ -853,6 +941,7 @@ export function createCloudAuthService(
       }
 
       cachedSession = mapped;
+      isPasswordRecovery = false;
       lastError = null;
       lastNotice = null;
       emitState();
@@ -868,6 +957,293 @@ export function createCloudAuthService(
         error: sanitizeAuthMessage(err, 'Cloud sign-in failed unexpectedly.'),
       };
     }
+  };
+
+  const signUpWithEmailPassword = async (
+    input: CloudSignUpInput
+  ): Promise<CloudAuthResult<CloudSignUpOutcome>> => {
+    const trimmedName = typeof input.fullName === 'string' ? input.fullName.trim() : '';
+    const trimmedEmail = typeof input.email === 'string' ? input.email.trim() : '';
+    const password = typeof input.password === 'string' ? input.password : '';
+
+    if (trimmedName.length < 2) {
+      return {
+        ok: false,
+        code: 'validation_error',
+        error: 'Full name must be at least 2 characters.',
+      };
+    }
+
+    const emailError = validateEmailAddress(trimmedEmail);
+    if (emailError) {
+      return {
+        ok: false,
+        code: 'validation_error',
+        error: emailError,
+      };
+    }
+
+    const passwordError = validatePasswordStrength(password);
+    if (passwordError) {
+      return {
+        ok: false,
+        code: 'validation_error',
+        error: passwordError,
+      };
+    }
+
+    const availability = clientManager.getAvailability();
+    if (availability.status === 'unconfigured') {
+      return {
+        ok: false,
+        code: 'unconfigured',
+        error: availability.reason ?? 'Cloud authentication is not configured.',
+      };
+    }
+    if (availability.status === 'offline') {
+      return {
+        ok: false,
+        code: 'offline',
+        error: 'Cannot create an account while offline. Reconnect to the internet and try again.',
+      };
+    }
+
+    const client = clientManager.getClient();
+    if (!client || availability.status === 'unavailable' || availability.status === 'error') {
+      return {
+        ok: false,
+        code: 'unavailable',
+        error: availability.reason ?? 'Cloud authentication service is unavailable.',
+      };
+    }
+
+    try {
+      const { data, error } = await client.auth.signUp({
+        email: trimmedEmail,
+        password,
+        options: {
+          data: {
+            full_name: trimmedName,
+          },
+        },
+      });
+
+      if (error) {
+        return {
+          ok: false,
+          code: 'auth_failed',
+          error: sanitizeAuthMessage(error, 'Account creation failed. Please try again.'),
+        };
+      }
+
+      const mapped = mapSupabaseSession(data.session, nowMs(), data.user);
+      if (mapped) {
+        cachedSession = mapped;
+        isPasswordRecovery = false;
+        lastError = null;
+        lastNotice = null;
+        emitState();
+
+        return {
+          ok: true,
+          data: {
+            status: 'authenticated',
+            email: trimmedEmail,
+            session: mapped,
+            message: 'Account created and signed in.',
+          },
+        };
+      }
+
+      // Confirmation required (never mark user authenticated until session exists)
+      cachedSession = null;
+      isPasswordRecovery = false;
+      lastError = null;
+      emitState();
+
+      return {
+        ok: true,
+        data: {
+          status: 'confirmation_required',
+          email: trimmedEmail,
+          session: null,
+          message:
+            'Account created. Check your email inbox and confirm your email address before signing in.',
+        },
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        code: 'auth_failed',
+        error: sanitizeAuthMessage(err, 'Unable to create your account right now.'),
+      };
+    }
+  };
+
+  const requestPasswordReset = async (
+    email: string
+  ): Promise<CloudAuthResult<{ email: string }>> => {
+    const trimmedEmail = typeof email === 'string' ? email.trim() : '';
+    const emailError = validateEmailAddress(trimmedEmail);
+    if (emailError) {
+      return {
+        ok: false,
+        code: 'validation_error',
+        error: emailError,
+      };
+    }
+
+    const availability = clientManager.getAvailability();
+    if (availability.status === 'unconfigured') {
+      return {
+        ok: false,
+        code: 'unconfigured',
+        error: availability.reason ?? 'Cloud authentication is not configured.',
+      };
+    }
+    if (availability.status === 'offline') {
+      return {
+        ok: false,
+        code: 'offline',
+        error: 'Cannot send a password reset email while offline.',
+      };
+    }
+
+    const client = clientManager.getClient();
+    if (!client || availability.status === 'unavailable' || availability.status === 'error') {
+      return {
+        ok: false,
+        code: 'unavailable',
+        error: availability.reason ?? 'Cloud authentication service is unavailable.',
+      };
+    }
+
+    const redirectTo = isDesktopRuntime()
+      ? buildPasswordRecoveryRedirectUri()
+      : typeof window !== 'undefined' && window.location?.origin
+        ? window.location.origin
+        : undefined;
+
+    try {
+      const { error } = await client.auth.resetPasswordForEmail(
+        trimmedEmail,
+        redirectTo ? { redirectTo } : undefined
+      );
+
+      if (error) {
+        return {
+          ok: false,
+          code: 'auth_failed',
+          error: sanitizeAuthMessage(error, 'Failed to send password reset email.'),
+        };
+      }
+
+      return {
+        ok: true,
+        data: { email: trimmedEmail },
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        code: 'auth_failed',
+        error: sanitizeAuthMessage(err, 'Unable to request password reset right now.'),
+      };
+    }
+  };
+
+  const updatePassword = async (
+    newPassword: string
+  ): Promise<CloudAuthResult<CloudAuthSession>> => {
+    const passwordError = validatePasswordStrength(newPassword);
+    if (passwordError) {
+      return {
+        ok: false,
+        code: 'validation_error',
+        error: passwordError,
+      };
+    }
+
+    const availability = clientManager.getAvailability();
+    if (availability.status === 'unconfigured') {
+      return {
+        ok: false,
+        code: 'unconfigured',
+        error: availability.reason ?? 'Cloud authentication is not configured.',
+      };
+    }
+    if (availability.status === 'offline') {
+      return {
+        ok: false,
+        code: 'offline',
+        error: 'Cannot update your password while offline.',
+      };
+    }
+
+    const client = clientManager.getClient();
+    if (!client || availability.status === 'unavailable' || availability.status === 'error') {
+      return {
+        ok: false,
+        code: 'unavailable',
+        error: availability.reason ?? 'Cloud authentication service is unavailable.',
+      };
+    }
+
+    try {
+      const { data, error } = await client.auth.updateUser({
+        password: newPassword,
+      });
+
+      if (error) {
+        return {
+          ok: false,
+          code: 'auth_failed',
+          error: sanitizeAuthMessage(error, 'Failed to update password. Please try again.'),
+        };
+      }
+
+      const sessionResult = await client.auth.getSession();
+      const refreshedSession = mapSupabaseSession(
+        sessionResult.data.session,
+        nowMs(),
+        data.user
+      );
+      const nextSession = refreshedSession ?? cachedSession;
+
+      isPasswordRecovery = false;
+      if (nextSession) {
+        cachedSession = nextSession;
+      }
+      lastError = null;
+      lastNotice = {
+        kind: 'info',
+        message: 'Your password has been updated.',
+      };
+      emitState();
+
+      if (!nextSession) {
+        return {
+          ok: false,
+          code: 'auth_failed',
+          error: 'Password updated, but no active session was returned. Please sign in again.',
+        };
+      }
+
+      return {
+        ok: true,
+        data: nextSession,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        code: 'auth_failed',
+        error: sanitizeAuthMessage(err, 'Unexpected error while updating password.'),
+      };
+    }
+  };
+
+  const cancelPasswordRecovery = async (): Promise<void> => {
+    isPasswordRecovery = false;
+    await signOut();
   };
 
   const cancelPendingSignIn = async (): Promise<void> => {
@@ -893,6 +1269,7 @@ export function createCloudAuthService(
   const signOut = async (): Promise<CloudAuthResult> => {
     await clearPendingFlow();
     isAuthenticating = false;
+    isPasswordRecovery = false;
     lastNotice = null;
     lastError = null;
 
@@ -949,8 +1326,13 @@ export function createCloudAuthService(
 
       const client = clientManager.getClient();
       if (client && !unsubscribeSupabaseAuth) {
-        const { data } = client.auth.onAuthStateChange((_event, session) => {
+        const { data } = client.auth.onAuthStateChange((event, session) => {
           cachedSession = mapSupabaseSession(session, nowMs());
+          if (event === 'PASSWORD_RECOVERY') {
+            isPasswordRecovery = true;
+          } else if (event === 'SIGNED_OUT') {
+            isPasswordRecovery = false;
+          }
           if (cachedSession) {
             isAuthenticating = false;
             lastError = null;
@@ -1039,6 +1421,10 @@ export function createCloudAuthService(
     getCurrentSession,
     signInWithGoogle,
     signInWithEmailPassword,
+    signUpWithEmailPassword,
+    requestPasswordReset,
+    updatePassword,
+    cancelPasswordRecovery,
     handleOAuthCallbackUrl,
     refreshSession,
     cancelPendingSignIn,

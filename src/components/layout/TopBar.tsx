@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
+import { useCloudAuth } from '../../hooks/useCloudAuth';
 import { useTheme } from '../../hooks/useTheme';
 import type { ThemeMode } from '../../utils/theme';
 import {
@@ -12,6 +13,7 @@ import {
   UserPlus,
   RefreshCw,
   Building,
+  LogOut,
   Sun,
   Moon,
   Monitor,
@@ -46,6 +48,7 @@ export const TopBar: React.FC<TopBarProps> = ({ onOpenMobileSidebar }) => {
     showConfirmDialog,
   } = useApp();
 
+  const { authState, signOut } = useCloudAuth();
   const { theme, setTheme } = useTheme();
 
   const [showThemeMenu, setShowThemeMenu] = useState(false);
@@ -358,7 +361,9 @@ export const TopBar: React.FC<TopBarProps> = ({ onOpenMobileSidebar }) => {
             <div className="absolute right-0 z-50 mt-2 w-64 border border-line bg-surface py-1 shadow-modal">
               <div className="border-b border-line px-4 py-3">
                 <p className="truncate text-[15px] font-medium text-ink">{businessProfile.name}</p>
-                <p className="truncate text-[13px] text-ink-secondary">{businessProfile.email}</p>
+                <p className="truncate text-[13px] text-ink-secondary">
+                  {authState.session?.email || businessProfile.email}
+                </p>
               </div>
               <button
                 onClick={() => {
@@ -385,6 +390,19 @@ export const TopBar: React.FC<TopBarProps> = ({ onOpenMobileSidebar }) => {
               >
                 <RefreshCw className="h-4 w-4 text-ink-muted" />
                 Restore demo data
+              </button>
+              <div className="my-1 border-t border-line" />
+              <button
+                type="button"
+                onClick={() => {
+                  setShowProfileMenu(false);
+                  void signOut();
+                }}
+                data-testid="topbar-signout-button"
+                className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-[15px] text-ink hover:bg-paper-sunken"
+              >
+                <LogOut className="h-4 w-4 text-ink-muted" />
+                Sign out
               </button>
             </div>
           )}

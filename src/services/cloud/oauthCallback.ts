@@ -2,6 +2,8 @@ export const BIZORA_OAUTH_REDIRECT_SCHEME = 'bizora';
 export const BIZORA_OAUTH_REDIRECT_URI = 'bizora://auth/callback';
 export const BIZORA_OAUTH_STATE_PARAM = 'bizora_state';
 export const BIZORA_PKCE_FLOW_ID_PARAM = 'sb_flow_id';
+export const BIZORA_AUTH_FLOW_PARAM = 'flow';
+export const BIZORA_PASSWORD_RECOVERY_REDIRECT_URI = `${BIZORA_OAUTH_REDIRECT_URI}?${BIZORA_AUTH_FLOW_PARAM}=recovery`;
 export const PENDING_OAUTH_STORAGE_KEY = 'bizora.cloud.pending_oauth_v1';
 export const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 
@@ -18,6 +20,8 @@ export interface ParsedOAuthCallback {
   code: string | null;
   bizoraState: string | null;
   flowId: string | null;
+  flow: string | null;
+  type: string | null;
   error: string | null;
   errorCode: string | null;
   errorDescription: string | null;
@@ -29,6 +33,12 @@ export type OAuthCallbackValidationResult =
   | { kind: 'duplicate'; fingerprint: string }
   | { kind: 'cancelled'; fingerprint: string; reason: string }
   | { kind: 'failed'; fingerprint: string; reason: string }
+  | {
+      kind: 'valid_recovery_code';
+      code: string;
+      flowId: string | null;
+      fingerprint: string;
+    }
   | {
       kind: 'valid_code';
       code: string;
@@ -68,6 +78,10 @@ export function buildOAuthRedirectUri(nonce: string): string {
   const url = new URL(BIZORA_OAUTH_REDIRECT_URI);
   url.searchParams.set(BIZORA_OAUTH_STATE_PARAM, nonce);
   return url.toString();
+}
+
+export function buildPasswordRecoveryRedirectUri(): string {
+  return BIZORA_PASSWORD_RECOVERY_REDIRECT_URI;
 }
 
 export function isValidOAuthBrowserUrl(rawUrl: string): boolean {
@@ -165,6 +179,8 @@ export function parseOAuthCallbackUrl(rawUrl: string): ParsedOAuthCallback {
       code: null,
       bizoraState: null,
       flowId: null,
+      flow: null,
+      type: null,
       error: null,
       errorCode: null,
       errorDescription: null,
@@ -186,6 +202,8 @@ export function parseOAuthCallbackUrl(rawUrl: string): ParsedOAuthCallback {
       code: null,
       bizoraState: null,
       flowId: null,
+      flow: null,
+      type: null,
       error: null,
       errorCode: null,
       errorDescription: null,
@@ -218,6 +236,8 @@ export function parseOAuthCallbackUrl(rawUrl: string): ParsedOAuthCallback {
     code: readParam('code'),
     bizoraState: readParam(BIZORA_OAUTH_STATE_PARAM),
     flowId: readParam(BIZORA_PKCE_FLOW_ID_PARAM),
+    flow: readParam(BIZORA_AUTH_FLOW_PARAM),
+    type: readParam('type'),
     error: readParam('error'),
     errorCode: readParam('error_code'),
     errorDescription: readParam('error_description'),
@@ -260,8 +280,12 @@ export function validateOAuthCallback(params: {
     };
   }
 
+  const isRecoveryCallback =
+    parsed.flow?.toLowerCase() === 'recovery' || parsed.type?.toLowerCase() === 'recovery';
+
   // If the callback carries bizora_state and we have an active flow, enforce constant-time match first
   if (
+    !isRecoveryCallback &&
     parsed.bizoraState !== null &&
     pendingFlow &&
     !timingSafeEqualStrings(parsed.bizoraState, pendingFlow.nonce)
@@ -274,7 +298,7 @@ export function validateOAuthCallback(params: {
   }
 
   if (parsed.error || parsed.errorCode || parsed.errorDescription) {
-    if (isCancelledOAuthError(parsed.error, parsed.errorDescription)) {
+    if (!isRecoveryCallback && isCancelledOAuthError(parsed.error, parsed.errorDescription)) {
       return {
         kind: 'cancelled',
         fingerprint,
@@ -293,7 +317,18 @@ export function validateOAuthCallback(params: {
     return {
       kind: 'failed',
       fingerprint,
-      reason: 'OAuth callback did not include an authorization code.',
+      reason: isRecoveryCallback
+        ? 'Password reset link was missing its verification code. Please request a new reset email.'
+        : 'OAuth callback did not include an authorization code.',
+    };
+  }
+
+  if (isRecoveryCallback) {
+    return {
+      kind: 'valid_recovery_code',
+      code: parsed.code,
+      flowId: parsed.flowId,
+      fingerprint,
     };
   }
 
