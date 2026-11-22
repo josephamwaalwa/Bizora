@@ -8,6 +8,7 @@ import { Textarea } from '../components/common/Textarea';
 import type { BusinessProfile, CurrencyCode } from '../types';
 import { exportJsonBackupFile, pickAndReadJsonBackupInTauri } from '../services/fileOperations';
 import { BusinessAvatar } from '../components/common/BusinessAvatar';
+import { CloudAccountSection } from '../components/settings/CloudAccountSection';
 import {
   Building2,
   Upload,
@@ -210,6 +211,9 @@ export const SettingsPage: React.FC = () => {
           Save Settings
         </Button>
       </div>
+
+      {/* Cloud Account & Google OAuth */}
+      <CloudAccountSection />
 
       <form onSubmit={handleSubmit} className="settings-form space-y-6">
         {/* 1. Brand & Business Profile */}

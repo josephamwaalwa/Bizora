@@ -1,8 +1,11 @@
 mod db;
+mod secure_storage;
 
 use db::dto::CommandError;
 use db::{DatabaseManager, DatabaseStatus};
 use tauri::Manager;
+#[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
+use tauri_plugin_deep_link::DeepLinkExt;
 
 #[tauri::command]
 async fn initialize_database(
@@ -38,10 +41,31 @@ async fn get_database_status(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }));
+    }
+
+    builder
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
+            #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
+            {
+                if let Err(err) = app.deep_link().register_all() {
+                    eprintln!("[Bizora Auth] Deep-link scheme registration warning: {err}");
+                }
+            }
+
             let db_manager = match app.path().app_data_dir() {
                 Ok(app_data_dir) => DatabaseManager::with_app_data_dir(&app_data_dir),
                 Err(_) => DatabaseManager::with_resolution_error(
@@ -111,7 +135,10 @@ pub fn run() {
             db::commands::mark_migration_not_needed,
             db::commands::record_migration_error,
             db::commands::replace_desktop_workspace,
-            db::commands::clear_desktop_workspace
+            db::commands::clear_desktop_workspace,
+            secure_storage::secure_storage_get_item,
+            secure_storage::secure_storage_set_item,
+            secure_storage::secure_storage_remove_item
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { ThemeProvider } from './context/ThemeContext';
 import { AppProvider, useApp } from './context/AppContext';
+import { cloudAuthService } from './services/cloud';
 import { AppLayout } from './components/layout/AppLayout';
 import { DashboardPage } from './pages/DashboardPage';
 import { QuotationsPage } from './pages/QuotationsPage';
@@ -24,6 +25,10 @@ const AppContent: React.FC = () => {
     retryWorkspaceStartup,
     refreshData,
   } = useApp();
+
+  useEffect(() => {
+    void cloudAuthService.initialize();
+  }, []);
 
   if (isWorkspaceLoading) {
     return (
