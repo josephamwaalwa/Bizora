@@ -550,3 +550,33 @@ test('Expired session refreshes on startup when online, offline startup without 
     refreshAuth.dispose();
   }
 });
+
+test('Startup initialization resolves cleanly to unauthenticated even if desktop deep-link plugin calls reject', async () => {
+  const storage = createMemoryAuthStorage();
+  const harness = makeFullAuthSupabaseHarness({ storage });
+  const manager = createSupabaseClientManager({
+    env: {
+      VITE_SUPABASE_URL: 'https://bizora-project.supabase.co',
+      VITE_SUPABASE_PUBLISHABLE_KEY: makeValidAnonKey(),
+    },
+    storage,
+    isOnline: () => true,
+    createClientFn: () => harness.client,
+  });
+
+  const authService = createCloudAuthService(manager, {
+    isDesktopRuntime: () => true,
+    subscribeDeepLinks: async () => {
+      throw new Error('Deep link listener unavailable');
+    },
+    getCurrentDeepLinks: async () => {
+      throw new Error('Deep link query unavailable');
+    },
+  });
+
+  const state = await authService.initialize();
+  assert.equal(state.status, 'unauthenticated');
+  assert.equal(state.isAuthenticated, false);
+  assert.equal(resolveAuthGateView(state, false), 'unauthenticated');
+  authService.dispose();
+});

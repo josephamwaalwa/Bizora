@@ -1309,77 +1309,109 @@ export function createCloudAuthService(
     }
   };
 
+  const withStartupTimeout = async <T,>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    fallback: T
+  ): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((resolve) => {
+          timer = setTimeout(() => resolve(fallback), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+    }
+  };
+
   const initialize = async (): Promise<CloudAuthState> => {
     if (initPromise) {
       return initPromise;
     }
 
     initPromise = (async () => {
-      if (!unsubscribeAvailability) {
-        unsubscribeAvailability = clientManager.subscribeAvailability((nextAvailability) => {
-          emitState();
-          if (nextAvailability.isOnline && cachedSession?.isExpired) {
-            void refreshSession();
-          }
-        });
-      }
-
-      const client = clientManager.getClient();
-      if (client && !unsubscribeSupabaseAuth) {
-        const { data } = client.auth.onAuthStateChange((event, session) => {
-          cachedSession = mapSupabaseSession(session, nowMs());
-          if (event === 'PASSWORD_RECOVERY') {
-            isPasswordRecovery = true;
-          } else if (event === 'SIGNED_OUT') {
-            isPasswordRecovery = false;
-          }
-          if (cachedSession) {
-            isAuthenticating = false;
-            lastError = null;
-          }
-          emitState();
-        });
-        unsubscribeSupabaseAuth = () => {
-          data.subscription.unsubscribe();
-        };
-      }
-
-      if (!unsubscribeDeepLink) {
-        try {
-          unsubscribeDeepLink = await subscribeDeepLinks((urls) => {
-            for (const url of urls) {
-              void handleOAuthCallbackUrl(url);
+      try {
+        if (!unsubscribeAvailability) {
+          unsubscribeAvailability = clientManager.subscribeAvailability((nextAvailability) => {
+            emitState();
+            if (nextAvailability.isOnline && cachedSession?.isExpired) {
+              void refreshSession();
             }
           });
+        }
+
+        const client = clientManager.getClient();
+        if (client && !unsubscribeSupabaseAuth) {
+          const { data } = client.auth.onAuthStateChange((event, session) => {
+            cachedSession = mapSupabaseSession(session, nowMs());
+            if (event === 'PASSWORD_RECOVERY') {
+              isPasswordRecovery = true;
+            } else if (event === 'SIGNED_OUT') {
+              isPasswordRecovery = false;
+            }
+            if (cachedSession) {
+              isAuthenticating = false;
+              lastError = null;
+            }
+            emitState();
+          });
+          unsubscribeSupabaseAuth = () => {
+            data.subscription.unsubscribe();
+          };
+        }
+
+        if (!unsubscribeDeepLink) {
+          try {
+            unsubscribeDeepLink = await withStartupTimeout(
+              subscribeDeepLinks((urls) => {
+                for (const url of urls) {
+                  void handleOAuthCallbackUrl(url);
+                }
+              }),
+              4000,
+              () => {}
+            );
+          } catch {
+            unsubscribeDeepLink = () => {};
+          }
+        }
+
+        // Restore any persisted OS keyring session cleanly without blocking startup indefinitely
+        await withStartupTimeout(getAuthState(), 5000, computeState());
+
+        if (cachedSession && cachedSession.isExpired && clientManager.getAvailability().isOnline) {
+          await withStartupTimeout(refreshSession(), 5000, {
+            ok: false,
+            code: 'auth_failed',
+            error: 'Session refresh timed out during startup.',
+          });
+        }
+
+        // Process any cold-launch deep-link URLs delivered via OS protocol invocation
+        let initialUrls: string[] | null = null;
+        try {
+          initialUrls = await withStartupTimeout(getInitialDeepLinks(), 3000, null);
         } catch {
-          unsubscribeDeepLink = () => {};
+          initialUrls = null;
         }
-      }
 
-      // Restore any persisted OS keyring session cleanly without blocking or erasing when offline
-      await getAuthState();
-
-      if (cachedSession && cachedSession.isExpired && clientManager.getAvailability().isOnline) {
-        await refreshSession();
-      }
-
-      // Process any cold-launch deep-link URLs delivered via OS protocol invocation
-      let initialUrls: string[] | null = null;
-      try {
-        initialUrls = await getInitialDeepLinks();
-      } catch {
-        initialUrls = null;
-      }
-
-      if (initialUrls && initialUrls.length > 0) {
-        for (const url of initialUrls) {
-          await handleOAuthCallbackUrl(url);
+        if (initialUrls && initialUrls.length > 0) {
+          for (const url of initialUrls) {
+            await handleOAuthCallbackUrl(url);
+          }
+        } else {
+          const pending = await withStartupTimeout(readPendingFlow(), 3000, null);
+          if (pending && nowMs() > pending.expiresAtMs) {
+            await clearPendingFlow();
+          }
         }
-      } else {
-        const pending = await readPendingFlow();
-        if (pending && nowMs() > pending.expiresAtMs) {
-          await clearPendingFlow();
-        }
+      } catch (err) {
+        lastError = sanitizeAuthMessage(err, 'Unable to restore previous session on startup.');
       }
 
       const finalState = computeState();
