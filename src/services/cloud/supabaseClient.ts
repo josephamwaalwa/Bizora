@@ -84,9 +84,24 @@ export function createSupabaseClientManager(
   const createClientFn = options?.createClientFn ?? defaultCreateSupabaseClient;
   const now = options?.now ?? (() => new Date().toISOString());
 
+  let diagnosticLogged = false;
+
   const getConfigStatus = (): SupabaseConfigValidationResult => {
     if (!cachedConfig) {
       cachedConfig = validateSupabaseConfig(options?.env);
+      if (
+        !diagnosticLogged &&
+        !cachedConfig.isConfigured &&
+        typeof console !== 'undefined' &&
+        typeof console.warn === 'function'
+      ) {
+        diagnosticLogged = true;
+        console.warn('[Bizora Auth] Cloud configuration inactive:', {
+          status: cachedConfig.status,
+          missingVars: cachedConfig.missingVars,
+          issues: cachedConfig.issues,
+        });
+      }
     }
     return cachedConfig;
   };
@@ -121,6 +136,9 @@ export function createSupabaseClientManager(
     } catch (err) {
       cachedClient = null;
       clientInitError = sanitizeClientInitError(err);
+      if (typeof console !== 'undefined' && typeof console.error === 'function') {
+        console.error('[Bizora Auth] Client initialization failed:', clientInitError);
+      }
       return null;
     }
   };

@@ -14,6 +14,7 @@ export type SupabaseEnvVarName =
 export interface SupabaseEnvInput {
   VITE_SUPABASE_URL?: unknown;
   VITE_SUPABASE_PUBLISHABLE_KEY?: unknown;
+  VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY?: unknown;
   VITE_SUPABASE_ANON_KEY?: unknown;
 }
 
@@ -56,6 +57,7 @@ const LOCAL_HTTP_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 function readDefaultViteEnv(): SupabaseEnvInput {
   let url: unknown;
   let publishableKey: unknown;
+  let publishableDefaultKey: unknown;
   let anonKey: unknown;
 
   // Use direct static property access so Vite/Rollup reliably inlines VITE_* vars in desktop builds.
@@ -72,6 +74,12 @@ function readDefaultViteEnv(): SupabaseEnvInput {
   }
 
   try {
+    publishableDefaultKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY;
+  } catch {
+    publishableDefaultKey = undefined;
+  }
+
+  try {
     anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
   } catch {
     anonKey = undefined;
@@ -80,6 +88,7 @@ function readDefaultViteEnv(): SupabaseEnvInput {
   return {
     VITE_SUPABASE_URL: url,
     VITE_SUPABASE_PUBLISHABLE_KEY: publishableKey,
+    VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY: publishableDefaultKey,
     VITE_SUPABASE_ANON_KEY: anonKey,
   };
 }
@@ -93,7 +102,14 @@ function normalizeEnvValue(
   if (typeof raw !== 'string') {
     return { kind: 'invalid_type' };
   }
-  const trimmed = raw.trim();
+  let trimmed = raw.trim();
+  if (
+    trimmed.length >= 2 &&
+    ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+      (trimmed.startsWith("'") && trimmed.endsWith("'")))
+  ) {
+    trimmed = trimmed.slice(1, -1).trim();
+  }
   if (!trimmed) {
     return { kind: 'missing' };
   }
@@ -264,13 +280,18 @@ export function validateSupabaseConfig(
 
   const urlEntry = normalizeEnvValue(env.VITE_SUPABASE_URL);
   const rawPublishableEntry = normalizeEnvValue(env.VITE_SUPABASE_PUBLISHABLE_KEY);
+  const rawPublishableDefaultFallback = normalizeEnvValue(
+    env.VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY
+  );
   const rawAnonFallback = normalizeEnvValue(env.VITE_SUPABASE_ANON_KEY);
   const keyEntry =
     rawPublishableEntry.kind !== 'missing'
       ? rawPublishableEntry
-      : rawAnonFallback.kind !== 'missing'
-        ? rawAnonFallback
-        : rawPublishableEntry;
+      : rawPublishableDefaultFallback.kind !== 'missing'
+        ? rawPublishableDefaultFallback
+        : rawAnonFallback.kind !== 'missing'
+          ? rawAnonFallback
+          : rawPublishableEntry;
 
   if (urlEntry.kind === 'missing') {
     missingVars.push('VITE_SUPABASE_URL');

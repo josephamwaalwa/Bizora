@@ -580,3 +580,49 @@ test('Startup initialization resolves cleanly to unauthenticated even if desktop
   assert.equal(resolveAuthGateView(state, false), 'unauthenticated');
   authService.dispose();
 });
+
+test('Windows UTF-8 BOM and UTF-16LE .env files parse cleanly and resolve client-safe Supabase keys without exposing secrets', async () => {
+  const {
+    decodeEnvFileBuffer,
+    parseEnvContent,
+    resolveSupabaseClientEnvFromSources,
+  } = await import('./envParser');
+
+  const key = makeValidAnonKey();
+  const bomUtf8 = Buffer.concat([
+    Buffer.from([0xef, 0xbb, 0xbf]),
+    Buffer.from(
+      `VITE_SUPABASE_URL="https://bzkbczagkofsylbdqczf.supabase.co"\r\nVITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY='${key}'\r\nSUPABASE_SERVICE_ROLE_KEY=sb_secret_never_expose_me\r\n`,
+      'utf8'
+    ),
+  ]);
+  const parsedUtf8 = parseEnvContent(decodeEnvFileBuffer(bomUtf8));
+  assert.equal(parsedUtf8.VITE_SUPABASE_URL, 'https://bzkbczagkofsylbdqczf.supabase.co');
+  assert.equal(parsedUtf8.VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY, key);
+
+  const utf16Le = Buffer.concat([
+    Buffer.from([0xff, 0xfe]),
+    Buffer.from(
+      `SUPABASE_URL=https://bzkbczagkofsylbdqczf.supabase.co\r\nSUPABASE_PUBLISHABLE_KEY=sb_publishable_valid_windows_key_123456\r\nSUPABASE_SECRET_KEY=sb_secret_blocked\r\n`,
+      'utf16le'
+    ),
+  ]);
+  const parsedUtf16 = parseEnvContent(decodeEnvFileBuffer(utf16Le));
+  const resolved = resolveSupabaseClientEnvFromSources([parsedUtf16]);
+  assert.equal(resolved.VITE_SUPABASE_URL, 'https://bzkbczagkofsylbdqczf.supabase.co');
+  assert.equal(
+    resolved.VITE_SUPABASE_PUBLISHABLE_KEY,
+    'sb_publishable_valid_windows_key_123456'
+  );
+  assert.equal('SUPABASE_SECRET_KEY' in resolved, false);
+  assert.equal('SUPABASE_SERVICE_ROLE_KEY' in resolved, false);
+
+  const validated = validateSupabaseConfig({
+    VITE_SUPABASE_URL: `"${parsedUtf8.VITE_SUPABASE_URL}"`,
+    VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY: parsedUtf8.VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY,
+  });
+  assert.equal(validated.status, 'configured');
+  assert.equal(validated.isConfigured, true);
+  assert.equal(validated.url, 'https://bzkbczagkofsylbdqczf.supabase.co');
+  assert.equal(validated.publishableKey, key);
+});
