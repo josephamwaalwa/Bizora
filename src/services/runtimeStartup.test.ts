@@ -67,7 +67,11 @@ function makeRawSnapshot(entries: Array<{ key: RawLegacyStorageSnapshot['entries
   };
 }
 
-function makeFakeAdapter(backend: 'localStorage' | 'sqlite', profileOverride?: BusinessProfile) {
+function makeFakeAdapter(
+  backend: 'localStorage' | 'sqlite',
+  profileOverride?: BusinessProfile,
+  hasProfile = true
+) {
   const calls: string[] = [];
   const savedSettings = new Map<string, unknown>();
   let currentProfile = profileOverride ?? initialBusinessProfile;
@@ -80,6 +84,10 @@ function makeFakeAdapter(backend: 'localStorage' | 'sqlite', profileOverride?: B
       supportsStandaloneAssets: backend === 'sqlite',
       supportsArbitrarySettings: backend === 'sqlite',
       supportsAtomicWorkspaceReplace: backend === 'sqlite',
+    },
+    async hasBusinessProfile() {
+      calls.push('hasBusinessProfile');
+      return hasProfile;
     },
     async getBusinessProfile() {
       calls.push('getBusinessProfile');
@@ -173,8 +181,10 @@ test('browser runtime uses BrowserPersistenceAdapter, calls initBrowserStorage, 
   assert.equal(result.status, 'ready');
   if (result.status !== 'ready') return;
   assert.equal(result.backend, 'localStorage');
+  assert.equal(result.needsBusinessSetup, false);
   assert.equal(result.migrationNotice, null);
-  assert.deepEqual(calls.slice(0, 5), [
+  assert.deepEqual(calls.slice(0, 6), [
+    'hasBusinessProfile',
     'getBusinessProfile',
     'getClients',
     'getQuotations',
@@ -227,15 +237,16 @@ test('desktop already completed skips migration and hydrates SQLite workspace pl
   assert.equal(result.status, 'ready');
   if (result.status !== 'ready') return;
   assert.equal(result.backend, 'sqlite');
+  assert.equal(result.needsBusinessSetup, false);
   assert.equal(result.businessProfile.name, 'Okavango Studio SQLite');
   assert.equal(result.themePreference, 'dark');
   assert.ok(calls.includes('getAppSetting:theme_preference'));
 });
 
-test('desktop empty_fresh_install marks not_needed, initializes demo SQLite workspace, never calls StorageService.init, and preserves theme', async () => {
+test('desktop empty_fresh_install marks not_needed, enters business onboarding without demo seeding, never calls StorageService.init, and preserves theme', async () => {
   let browserInitCalls = 0;
   const markSources: Array<string | null | undefined> = [];
-  const { adapter, calls, savedSettings } = makeFakeAdapter('sqlite');
+  const { adapter, calls, savedSettings } = makeFakeAdapter('sqlite', undefined, false);
 
   const result = await coordinateRuntimeStartup({
     detectBackend: () => 'sqlite',
@@ -256,17 +267,21 @@ test('desktop empty_fresh_install marks not_needed, initializes demo SQLite work
 
   assert.equal(browserInitCalls, 0);
   assert.deepEqual(markSources, ['desktop_fresh_install']);
-  assert.ok(calls.includes('resetToDemoData'));
+  assert.equal(calls.includes('resetToDemoData'), false);
+  assert.equal(calls.includes('getBusinessProfile'), false);
   assert.equal(savedSettings.get('theme_preference'), 'dark');
   assert.equal(result.status, 'ready');
   if (result.status !== 'ready') return;
+  assert.equal(result.needsBusinessSetup, true);
+  assert.equal(result.businessProfile.defaultCurrency, 'NAD');
+  assert.deepEqual(result.clients, []);
   assert.equal(result.themePreference, 'dark');
   assert.equal(result.migrationNotice, null);
 });
 
-test('desktop demo_seed_only marks not_needed(demo_seed_only) without importing demo seed as user migration', async () => {
+test('desktop demo_seed_only marks not_needed(demo_seed_only) and opens onboarding without importing or reseeding demo data', async () => {
   const markSources: Array<string | null | undefined> = [];
-  const { adapter, calls, savedSettings } = makeFakeAdapter('sqlite');
+  const { adapter, calls, savedSettings } = makeFakeAdapter('sqlite', undefined, false);
 
   const result = await coordinateRuntimeStartup({
     detectBackend: () => 'sqlite',
@@ -298,11 +313,38 @@ test('desktop demo_seed_only marks not_needed(demo_seed_only) without importing 
   });
 
   assert.deepEqual(markSources, ['demo_seed_only']);
-  assert.ok(calls.includes('resetToDemoData'));
+  assert.equal(calls.includes('resetToDemoData'), false);
+  assert.equal(calls.includes('getBusinessProfile'), false);
   assert.equal(savedSettings.get('theme_preference'), 'light');
   assert.equal(result.status, 'ready');
   if (result.status !== 'ready') return;
+  assert.equal(result.needsBusinessSetup, true);
+  assert.equal(result.businessProfile.defaultCurrency, 'NAD');
   assert.equal(result.migrationNotice, null);
+});
+
+test('desktop completed state with zero businesses enters onboarding without clearing or seeding', async () => {
+  const { adapter, calls } = makeFakeAdapter('sqlite', undefined, false);
+
+  const result = await coordinateRuntimeStartup({
+    detectBackend: () => 'sqlite',
+    createAdapter: () => adapter,
+    initializeDesktopDatabase: async () => null,
+    getMigrationStatus: async () =>
+      makeStatus({
+        state: 'completed',
+        markerVersion: 1,
+        existingCounts: makeCounts({ businesses: '0' }),
+      }),
+  });
+
+  assert.equal(result.status, 'ready');
+  if (result.status !== 'ready') return;
+  assert.equal(result.needsBusinessSetup, true);
+  assert.equal(result.businessProfile.defaultCurrency, 'NAD');
+  assert.equal(calls.includes('clearAllData'), false);
+  assert.equal(calls.includes('resetToDemoData'), false);
+  assert.equal(calls.includes('getBusinessProfile'), false);
 });
 
 test('desktop real LocalStorage migration succeeds cleanly and surfaces migrationNotice', async () => {

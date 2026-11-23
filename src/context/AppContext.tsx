@@ -26,7 +26,6 @@ import {
   type PersistenceBackend,
   type SaveClientInput,
 } from '../services/persistence';
-import { initialBusinessProfile } from '../services/seedData';
 import {
   coordinateRuntimeStartup,
   type RuntimeStartupResult,
@@ -44,6 +43,11 @@ import {
   validateQuotationStatusChange,
 } from '../utils/documentWorkflow';
 import { useTheme } from '../hooks/useTheme';
+import {
+  buildNewBusinessProfile,
+  createEmptyBusinessProfileDraft,
+  type OnboardingFormValues,
+} from '../components/onboarding/businessOnboarding';
 
 export interface AppBackupImportResult {
   ok: boolean;
@@ -81,6 +85,7 @@ export interface AppContextType {
 
   // Workspace Lifecycle & Async Readiness
   isWorkspaceLoading: boolean;
+  needsBusinessSetup: boolean;
   isSaving: boolean;
   persistenceBackend: PersistenceBackend;
   persistenceError: string | null;
@@ -102,6 +107,7 @@ export interface AppContextType {
   setSearchQuery: (q: string) => void;
 
   // Business Actions
+  completeBusinessSetup: (values: OnboardingFormValues) => Promise<boolean>;
   updateBusinessProfile: (profile: BusinessProfile) => Promise<boolean>;
 
   // Client Actions
@@ -185,6 +191,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
 
   // Workspace lifecycle & error states
   const [isWorkspaceLoading, setIsWorkspaceLoading] = useState<boolean>(true);
+  const [needsBusinessSetup, setNeedsBusinessSetup] = useState<boolean>(false);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [persistenceBackend, setPersistenceBackend] = useState<PersistenceBackend>('localStorage');
   const [persistenceError, setPersistenceError] = useState<string | null>(null);
@@ -197,7 +204,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const desktopThemeHydratedRef = useRef(false);
 
   // Domain states
-  const [businessProfile, setBusinessProfile] = useState<BusinessProfile>(initialBusinessProfile);
+  const [businessProfile, setBusinessProfile] = useState<BusinessProfile>(() =>
+    createEmptyBusinessProfileDraft()
+  );
   const [clients, setClients] = useState<Client[]>([]);
   const [quotations, setQuotations] = useState<Quotation[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
@@ -254,6 +263,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, []);
 
   const reloadWorkspaceFromAdapter = useCallback(async (adapter: PersistenceAdapter) => {
+    const hasProfile = await adapter.hasBusinessProfile();
+    if (!hasProfile) {
+      setNeedsBusinessSetup(true);
+      setBusinessProfile(createEmptyBusinessProfileDraft());
+      setClients([]);
+      setQuotations([]);
+      setInvoices([]);
+      setActivities([]);
+      setPersistenceError(null);
+      return;
+    }
+
     const [nextProfile, nextClients, nextQuotations, nextInvoices, nextActivities] =
       await Promise.all([
         adapter.getBusinessProfile(),
@@ -263,6 +284,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         adapter.getActivities(),
       ]);
 
+    setNeedsBusinessSetup(false);
     setBusinessProfile(nextProfile);
     setClients(nextClients);
     setQuotations(nextQuotations);
@@ -315,6 +337,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       adapterRef.current = result.adapter;
       setPersistenceBackend(result.backend);
       setStartupBlockState(null);
+      setNeedsBusinessSetup(result.needsBusinessSetup);
       setBusinessProfile(result.businessProfile);
       setClients(result.clients);
       setQuotations(result.quotations);
@@ -410,6 +433,49 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   }, [reloadWorkspaceFromAdapter, retryWorkspaceStartup, addToast]);
 
   // Business Profile
+  const completeBusinessSetup = useCallback(
+    async (values: OnboardingFormValues): Promise<boolean> => {
+      try {
+        const newProfile = buildNewBusinessProfile(values);
+        await runMutation(async (adapter) => {
+          const saved = await adapter.saveBusinessProfile(newProfile);
+          const persisted = didAdapterPersistLastWrite(adapter);
+          setBusinessProfile(saved);
+          setNeedsBusinessSetup(false);
+          await reloadWorkspaceFromAdapter(adapter);
+          setActiveView('dashboard');
+
+          if (persisted) {
+            addToast({
+              type: 'success',
+              title: 'Business Profile Created',
+              message: `${saved.name} is ready.`,
+            });
+          } else {
+            addToast({
+              type: 'warning',
+              title: 'Saved to Active Session',
+              message:
+                'Business profile saved in memory, but browser storage could not persist it across reloads (check logo file size).',
+            });
+          }
+        });
+        return true;
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'Failed to save business profile.';
+        setPersistenceError(message);
+        addToast({
+          type: 'error',
+          title: 'Setup Failed',
+          message,
+        });
+        return false;
+      }
+    },
+    [runMutation, reloadWorkspaceFromAdapter, setActiveView, addToast]
+  );
+
   const updateBusinessProfile = useCallback(
     async (profile: BusinessProfile): Promise<boolean> => {
       try {
@@ -1646,6 +1712,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         activeEntityId,
         setActiveView,
         isWorkspaceLoading,
+        needsBusinessSetup,
         isSaving,
         persistenceBackend,
         persistenceError,
@@ -1661,6 +1728,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         activities,
         searchQuery,
         setSearchQuery,
+        completeBusinessSetup,
         updateBusinessProfile,
         saveClient,
         deleteClient,

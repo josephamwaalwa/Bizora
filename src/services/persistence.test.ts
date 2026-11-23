@@ -25,6 +25,7 @@ import type {
   UpdateBusinessInput,
   UpdateClientInput,
   UpdateInvoiceInput,
+  UpdateLocalProfileInput,
   UpdateQuotationInput,
   WorkspaceLifecycleResultDto,
 } from './database';
@@ -38,6 +39,7 @@ import {
   type SqlitePersistenceBridge,
 } from './persistence';
 import { initialBusinessProfile, initialClients } from './seedData';
+import { StorageService } from './storage';
 import type { BusinessProfile, Invoice, Quotation } from '../types';
 import { THEME_STORAGE_KEY } from '../utils/theme';
 
@@ -110,6 +112,22 @@ class InMemorySqliteBridgeMock implements SqlitePersistenceBridge {
     };
     this.localProfiles.set(dto.id, dto);
     return dto;
+  }
+
+  async updateLocalProfile(input: UpdateLocalProfileInput): Promise<LocalProfileDto> {
+    this.calls.push('updateLocalProfile');
+    const existing = this.localProfiles.get(input.id);
+    if (!existing) throw new Error(`Local profile not found: ${input.id}`);
+    const updated: LocalProfileDto = {
+      ...existing,
+      displayName: input.displayName,
+      email: input.email,
+      supabaseUserId:
+        input.supabaseUserId !== undefined ? input.supabaseUserId : existing.supabaseUserId,
+      updatedAt: this.tick(),
+    };
+    this.localProfiles.set(updated.id, updated);
+    return updated;
   }
 
   async getBusinesses(ownerProfileId?: string | null): Promise<BusinessDto[]> {
@@ -1142,5 +1160,82 @@ test('SqlitePersistenceAdapter protects migration keys and handles atomic backup
     (err: unknown) => err instanceof PersistenceError && err.code === 'WORKSPACE_NOT_INITIALIZED'
   );
 
+  assert.equal(mockStorage.accessLog.length, 0);
+});
+
+// ============================================================
+// 4. First-Time Business Onboarding & Owner Name Persistence
+// ============================================================
+
+test('BrowserPersistenceAdapter detects uninitialized onboarding state without auto-seeding demo data', async () => {
+  StorageService.init();
+  const adapter = new BrowserPersistenceAdapter();
+
+  assert.equal(await adapter.hasBusinessProfile(), false);
+  assert.equal(mockStorage.getItem('bizora_business_profile_v1'), null);
+
+  await adapter.saveBusinessProfile(
+    makeTestProfile({
+      name: 'Windhoek Advisory',
+      ownerName: 'Selma Shikongo',
+      email: '',
+    })
+  );
+
+  assert.equal(await adapter.hasBusinessProfile(), true);
+  const loaded = await adapter.getBusinessProfile();
+  assert.equal(loaded.name, 'Windhoek Advisory');
+  assert.equal(loaded.ownerName, 'Selma Shikongo');
+  assert.equal(loaded.email, '');
+
+  await adapter.clearAllData();
+  assert.equal(await adapter.hasBusinessProfile(), true);
+});
+
+test('SqlitePersistenceAdapter reports hasBusinessProfile accurately and persists ownerName via local_profiles', async () => {
+  const bridge = new InMemorySqliteBridgeMock();
+  const adapter = new SqlitePersistenceAdapter({
+    bridge,
+    now: () => '2026-11-23T08:00:00.000Z',
+  });
+
+  assert.equal(await adapter.hasBusinessProfile(), false);
+  await assert.rejects(
+    () => adapter.getBusinessProfile(),
+    (err: unknown) => err instanceof PersistenceError && err.code === 'WORKSPACE_NOT_INITIALIZED'
+  );
+
+  const created = await adapter.saveBusinessProfile(
+    makeTestProfile({
+      name: 'Kalahari Solar Works',
+      ownerName: 'Lukas Amupadhi',
+      email: '',
+      phone: '',
+      address: '',
+      defaultCurrency: 'NAD',
+      currencySymbol: 'N$',
+    })
+  );
+
+  assert.equal(await adapter.hasBusinessProfile(), true);
+  assert.equal(created.ownerName, 'Lukas Amupadhi');
+
+  const rehydrated = await adapter.getBusinessProfile();
+  assert.equal(rehydrated.name, 'Kalahari Solar Works');
+  assert.equal(rehydrated.ownerName, 'Lukas Amupadhi');
+  assert.equal(rehydrated.defaultCurrency, 'NAD');
+
+  // Updating and clearing ownerName updates local_profiles cleanly
+  await adapter.saveBusinessProfile({
+    ...rehydrated,
+    ownerName: 'Maria Lukas',
+  });
+  assert.equal((await adapter.getBusinessProfile()).ownerName, 'Maria Lukas');
+
+  await adapter.saveBusinessProfile({
+    ...rehydrated,
+    ownerName: '',
+  });
+  assert.equal((await adapter.getBusinessProfile()).ownerName, undefined);
   assert.equal(mockStorage.accessLog.length, 0);
 });

@@ -11,12 +11,15 @@ import { InvoiceFormPage } from './pages/InvoiceFormPage';
 import { ClientsPage } from './pages/ClientsPage';
 import { ClientDetailPage } from './pages/ClientDetailPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { BusinessSetupScreen } from './components/onboarding/BusinessSetupScreen';
+import { resolveWorkspaceScreenView } from './components/onboarding/businessOnboarding';
 
 const AppContent: React.FC = () => {
   const {
     activeView,
     activeEntityId,
     isWorkspaceLoading,
+    needsBusinessSetup,
     persistenceError,
     clearPersistenceError,
     startupBlockState,
@@ -26,7 +29,13 @@ const AppContent: React.FC = () => {
     refreshData,
   } = useApp();
 
-  if (isWorkspaceLoading) {
+  const screenView = resolveWorkspaceScreenView({
+    isWorkspaceLoading,
+    hasStartupBlock: Boolean(startupBlockState),
+    needsBusinessSetup,
+  });
+
+  if (screenView === 'loading') {
     return (
       <div className="flex min-h-screen items-center justify-center bg-paper px-6 text-ink">
         <div className="text-center space-y-2">
@@ -104,6 +113,10 @@ const AppContent: React.FC = () => {
         </div>
       </div>
     );
+  }
+
+  if (screenView === 'onboarding') {
+    return <BusinessSetupScreen />;
   }
 
   const renderActiveView = () => {

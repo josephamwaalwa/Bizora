@@ -277,13 +277,19 @@ export const SettingsPage: React.FC = () => {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <Input
               label="Business Name"
               value={profile.name}
               onChange={(e) => handleChange('name', e.target.value)}
               placeholder="e.g. Kalahari Creative Studio"
               required
+            />
+            <Input
+              label="Owner's Full Name"
+              value={profile.ownerName || ''}
+              onChange={(e) => handleChange('ownerName', e.target.value)}
+              placeholder="e.g. Elena Shikongo"
             />
             <Input
               label="Tagline / Subtitle"
@@ -300,7 +306,6 @@ export const SettingsPage: React.FC = () => {
               value={profile.email}
               onChange={(e) => handleChange('email', e.target.value)}
               placeholder="hello@business.com.na"
-              required
             />
             <Input
               label="Phone Number"

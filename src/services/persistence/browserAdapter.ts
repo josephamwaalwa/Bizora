@@ -33,6 +33,7 @@ import {
 export interface BrowserStorageBackend {
   lastWritePersisted: boolean;
   lastImportError: string | null;
+  hasBusinessProfile?(): boolean;
   getBusinessProfile(): BusinessProfile;
   saveBusinessProfile(profile: BusinessProfile): BusinessProfile;
   getClients(): Client[];
@@ -136,6 +137,13 @@ export class BrowserPersistenceAdapter implements PersistenceAdapter {
   }
 
   // Business Profile
+  async hasBusinessProfile(): Promise<boolean> {
+    if (typeof this.storage.hasBusinessProfile === 'function') {
+      return this.storage.hasBusinessProfile();
+    }
+    return Boolean(this.storage.getBusinessProfile().name?.trim());
+  }
+
   async getBusinessProfile(): Promise<BusinessProfile> {
     return this.storage.getBusinessProfile();
   }

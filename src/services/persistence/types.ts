@@ -68,6 +68,7 @@ export interface PersistenceAdapter {
   readonly capabilities: PersistenceCapabilities;
 
   // Business Profile
+  hasBusinessProfile(): Promise<boolean>;
   getBusinessProfile(): Promise<BusinessProfile>;
   saveBusinessProfile(profile: BusinessProfile): Promise<BusinessProfile>;
 

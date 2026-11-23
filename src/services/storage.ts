@@ -77,6 +77,8 @@ function readRaw(key: string): string | null {
       memoryStorage.set(key, val);
       return val;
     }
+    memoryStorage.delete(key);
+    return null;
   } catch (error) {
     console.warn(`Unable to read ${key} from localStorage, using memory fallback:`, error);
   }
@@ -347,16 +349,31 @@ export const StorageService = {
   lastImportError: null as string | null,
 
   /**
-   * Initializes local storage with rich sample data on first run,
-   * or safely normalizes legacy relationship fields on existing records.
+   * Normalizes legacy relationship fields on existing records without auto-seeding
+   * demo data on uninitialized fresh installs.
    */
   init(): void {
     const hasInitialized = readRaw(KEYS.INITIALIZED);
-    if (!hasInitialized) {
-      this.resetToDemoData();
+    const hasProfile = readRaw(KEYS.PROFILE);
+    if (!hasInitialized && !hasProfile) {
       return;
     }
     this.normalizeLegacyRelationships();
+  },
+
+  hasBusinessProfile(): boolean {
+    const raw = readRaw(KEYS.PROFILE);
+    if (!raw) return false;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      return (
+        isPlainObject(parsed) &&
+        typeof parsed.name === 'string' &&
+        parsed.name.trim().length > 0
+      );
+    } catch {
+      return false;
+    }
   },
 
   /**
@@ -551,13 +568,14 @@ export const StorageService = {
   },
 
   saveBusinessProfile(profile: BusinessProfile): BusinessProfile {
-    const previousProfile = this.getBusinessProfile();
+    const hadSavedProfile = Boolean(readRaw(KEYS.PROFILE));
+    const previousProfile = hadSavedProfile ? this.getBusinessProfile() : null;
     const updated = { ...profile, updatedAt: new Date().toISOString() };
     let persisted = true;
 
     // Preserve historical snapshots that referenced the previous profile logo
     if (
-      previousProfile.logoUrl &&
+      previousProfile?.logoUrl &&
       previousProfile.logoUrl.length > LARGE_LOGO_THRESHOLD &&
       previousProfile.logoUrl !== updated.logoUrl
     ) {
@@ -599,10 +617,13 @@ export const StorageService = {
     }
 
     persisted = safeSet(KEYS.PROFILE, updated) && persisted;
+    persisted = writeRaw(KEYS.INITIALIZED, 'true') && persisted;
     this.addActivity({
       type: 'settings_updated',
-      title: 'Business Profile Updated',
-      description: `Settings updated for ${profile.name}`,
+      title: hadSavedProfile ? 'Business Profile Updated' : 'Business Profile Created',
+      description: hadSavedProfile
+        ? `Settings updated for ${profile.name}`
+        : `Workspace configured for ${profile.name}`,
     });
     this.lastWritePersisted = persisted;
     return updated;

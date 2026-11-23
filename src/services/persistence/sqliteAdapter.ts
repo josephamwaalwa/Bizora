@@ -43,6 +43,7 @@ import {
   type UpdateBusinessInput,
   type UpdateClientInput,
   type UpdateInvoiceInput,
+  type UpdateLocalProfileInput,
   type UpdateQuotationInput,
   type WorkspaceLifecycleResultDto,
 } from '../database';
@@ -71,6 +72,7 @@ const PROTECTED_MIGRATION_SETTING_PREFIX = 'migration.localstorage_v1';
 export interface SqlitePersistenceBridge {
   getLocalProfiles(): Promise<LocalProfileDto[]>;
   createLocalProfile(input: CreateLocalProfileInput): Promise<LocalProfileDto>;
+  updateLocalProfile?: (input: UpdateLocalProfileInput) => Promise<LocalProfileDto>;
   getBusinesses(ownerProfileId?: string | null): Promise<BusinessDto[]>;
   getBusinessById(id: string): Promise<BusinessDto | null>;
   createBusiness(input: CreateBusinessInput): Promise<BusinessDto>;
@@ -127,6 +129,7 @@ export interface SqlitePersistenceAdapterOptions {
 const DEFAULT_SQLITE_BRIDGE: SqlitePersistenceBridge = {
   getLocalProfiles: () => DesktopDatabaseService.getLocalProfiles(),
   createLocalProfile: (input) => DesktopDatabaseService.createLocalProfile(input),
+  updateLocalProfile: (input) => DesktopDatabaseService.updateLocalProfile(input),
   getBusinesses: (ownerProfileId) => DesktopDatabaseService.getBusinesses(ownerProfileId),
   getBusinessById: (id) => DesktopDatabaseService.getBusinessById(id),
   createBusiness: (input) => DesktopDatabaseService.createBusiness(input),
@@ -253,10 +256,15 @@ function normalizeCurrencyCode(raw: string): CurrencyCode {
   return VALID_CURRENCY_CODES.has(upper) ? upper : 'NAD';
 }
 
-function mapBusinessDtoToDomain(dto: BusinessDto, resolvedLogoUrl: string): BusinessProfile {
+function mapBusinessDtoToDomain(
+  dto: BusinessDto,
+  resolvedLogoUrl: string,
+  ownerName?: string
+): BusinessProfile {
   return {
     id: dto.id,
     name: dto.name,
+    ownerName,
     tagline: dto.tagline,
     logoUrl: resolvedLogoUrl,
     email: dto.email,
@@ -581,7 +589,18 @@ export class SqlitePersistenceAdapter implements PersistenceAdapter {
       const asset = await this.bridge.getBusinessAssetById(dto.logoAssetId);
       resolvedLogoUrl = resolveAssetUrl(asset, dto.logoUrlFallback);
     }
-    return mapBusinessDtoToDomain(dto, resolvedLogoUrl);
+
+    let resolvedOwnerName: string | undefined;
+    if (dto.ownerProfileId) {
+      const profiles = await this.bridge.getLocalProfiles();
+      const owner = profiles.find((p) => p.id === dto.ownerProfileId) ?? profiles[0];
+      const trimmedDisplay = owner?.displayName?.trim() ?? '';
+      if (trimmedDisplay && trimmedDisplay !== 'Local User') {
+        resolvedOwnerName = trimmedDisplay;
+      }
+    }
+
+    return mapBusinessDtoToDomain(dto, resolvedLogoUrl, resolvedOwnerName);
   }
 
   private async ensureLogoAssetForUrl(
@@ -641,6 +660,11 @@ export class SqlitePersistenceAdapter implements PersistenceAdapter {
   }
 
   // Business Profile
+  async hasBusinessProfile(): Promise<boolean> {
+    const business = await this.findActiveBusiness();
+    return business !== null;
+  }
+
   async getBusinessProfile(): Promise<BusinessProfile> {
     const business = await this.requireActiveBusiness();
     return this.hydrateBusinessProfile(business);
@@ -655,6 +679,7 @@ export class SqlitePersistenceAdapter implements PersistenceAdapter {
     );
     const nextQuoteNumber = toSafeInt64(Math.max(1, Math.trunc(profile.nextQuoteNumber || 1)));
     const nextInvoiceNumber = toSafeInt64(Math.max(1, Math.trunc(profile.nextInvoiceNumber || 1)));
+    const trimmedOwnerName = (profile.ownerName ?? '').trim();
 
     if (!existing) {
       const profiles = await this.bridge.getLocalProfiles();
@@ -662,13 +687,21 @@ export class SqlitePersistenceAdapter implements PersistenceAdapter {
       if (!ownerProfileId) {
         const createdProfile = await this.bridge.createLocalProfile({
           id: generateId('prof'),
-          displayName: profile.name.trim() || 'Local User',
+          displayName: trimmedOwnerName,
           email: profile.email.trim(),
           supabaseUserId: null,
           createdAt: this.now(),
           updatedAt: this.now(),
         });
         ownerProfileId = createdProfile.id;
+      } else if (this.bridge.updateLocalProfile) {
+        const existingOwner = profiles[0];
+        await this.bridge.updateLocalProfile({
+          id: existingOwner.id,
+          displayName: trimmedOwnerName,
+          email: existingOwner.email || profile.email.trim(),
+          supabaseUserId: existingOwner.supabaseUserId,
+        });
       }
 
       const businessId = profile.id?.trim() || generateId('biz');
@@ -762,6 +795,19 @@ export class SqlitePersistenceAdapter implements PersistenceAdapter {
       });
 
       return this.hydrateBusinessProfile(finalBusiness);
+    }
+
+    if (existing.ownerProfileId && this.bridge.updateLocalProfile) {
+      const profiles = await this.bridge.getLocalProfiles();
+      const existingOwner = profiles.find((p) => p.id === existing.ownerProfileId) ?? profiles[0];
+      if (existingOwner) {
+        await this.bridge.updateLocalProfile({
+          id: existingOwner.id,
+          displayName: trimmedOwnerName,
+          email: existingOwner.email || profile.email.trim(),
+          supabaseUserId: existingOwner.supabaseUserId,
+        });
+      }
     }
 
     const logoAsset = await this.ensureLogoAssetForUrl(existing.id, profile.logoUrl);

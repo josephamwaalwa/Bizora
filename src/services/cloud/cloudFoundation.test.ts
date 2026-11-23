@@ -37,6 +37,9 @@ function makeStartupAdapter(backend: 'localStorage' | 'sqlite'): PersistenceAdap
       supportsArbitrarySettings: backend === 'sqlite',
       supportsAtomicWorkspaceReplace: backend === 'sqlite',
     },
+    async hasBusinessProfile() {
+      return true;
+    },
     async getBusinessProfile() {
       return initialBusinessProfile;
     },

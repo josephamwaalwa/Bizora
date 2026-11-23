@@ -12,6 +12,7 @@ export interface BankDetails {
 export interface BusinessProfile {
   id: string;
   name: string;
+  ownerName?: string;
   tagline: string;
   logoUrl: string;
   email: string;

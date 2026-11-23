@@ -27,6 +27,7 @@ import type {
   Quotation,
 } from '../types';
 import { isValidThemeMode, THEME_STORAGE_KEY, type ThemeMode } from '../utils/theme';
+import { createEmptyBusinessProfileDraft } from '../components/onboarding/businessOnboarding';
 
 export interface StartupNotice {
   tone: 'info' | 'warning';
@@ -48,6 +49,7 @@ export type RuntimeStartupResult =
       status: 'ready';
       backend: PersistenceBackend;
       adapter: PersistenceAdapter;
+      needsBusinessSetup: boolean;
       businessProfile: BusinessProfile;
       clients: Client[];
       quotations: Quotation[];
@@ -153,21 +155,41 @@ async function hydrateReadyResult(params: {
   readThemeFromAdapter: boolean;
 }): Promise<RuntimeStartupResult> {
   const { backend, adapter, migrationNotice = null, readThemeFromAdapter } = params;
-  const [businessProfile, clients, quotations, invoices, activities, rawTheme] = await Promise.all([
+  const [hasProfile, rawTheme] = await Promise.all([
+    adapter.hasBusinessProfile(),
+    readThemeFromAdapter ? adapter.getAppSetting<unknown>('theme_preference') : Promise.resolve(null),
+  ]);
+  const themePreference = isValidThemeMode(rawTheme) ? rawTheme : null;
+
+  if (!hasProfile) {
+    return {
+      status: 'ready',
+      backend,
+      adapter,
+      needsBusinessSetup: true,
+      businessProfile: createEmptyBusinessProfileDraft(),
+      clients: [],
+      quotations: [],
+      invoices: [],
+      activities: [],
+      themePreference,
+      migrationNotice,
+    };
+  }
+
+  const [businessProfile, clients, quotations, invoices, activities] = await Promise.all([
     adapter.getBusinessProfile(),
     adapter.getClients(),
     adapter.getQuotations(),
     adapter.getInvoices(),
     adapter.getActivities(),
-    readThemeFromAdapter ? adapter.getAppSetting<unknown>('theme_preference') : Promise.resolve(null),
   ]);
-
-  const themePreference = isValidThemeMode(rawTheme) ? rawTheme : null;
 
   return {
     status: 'ready',
     backend,
     adapter,
+    needsBusinessSetup: false,
     businessProfile,
     clients,
     quotations,
@@ -290,9 +312,6 @@ export async function coordinateRuntimeStartup(
   }
 
   if (migrationStatus.state === 'completed') {
-    if (parseSafeInt64(migrationStatus.existingCounts.businesses) === 0n) {
-      await adapter.clearAllData();
-    }
     return hydrateReadyResult({
       backend: 'sqlite',
       adapter,
@@ -301,9 +320,6 @@ export async function coordinateRuntimeStartup(
   }
 
   if (migrationStatus.state === 'not_needed') {
-    if (parseSafeInt64(migrationStatus.existingCounts.businesses) === 0n) {
-      await adapter.resetToDemoData();
-    }
     return hydrateReadyResult({
       backend: 'sqlite',
       adapter,
@@ -341,7 +357,6 @@ export async function coordinateRuntimeStartup(
 
   if (classification === 'empty_fresh_install') {
     await markNotNeeded('desktop_fresh_install');
-    await adapter.resetToDemoData();
     if (snapshotTheme) {
       await adapter.saveAppSetting('theme_preference', snapshotTheme);
     }
@@ -387,7 +402,6 @@ export async function coordinateRuntimeStartup(
 
     case 'empty_fresh_install':
       await markNotNeeded('desktop_fresh_install');
-      await adapter.resetToDemoData();
       if (snapshotTheme) {
         await adapter.saveAppSetting('theme_preference', snapshotTheme);
       }
@@ -399,7 +413,6 @@ export async function coordinateRuntimeStartup(
 
     case 'demo_seed_only':
       await markNotNeeded('demo_seed_only');
-      await adapter.resetToDemoData();
       if (snapshotTheme) {
         await adapter.saveAppSetting('theme_preference', snapshotTheme);
       }
